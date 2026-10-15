@@ -102,12 +102,18 @@ if ($dirty) {
     throw "先 commit 再合并（合并要能干净回退）。"
 }
 
-# 先确认官方资料是新的；取不到就别合。
-$fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
-if ($fetch.Code -ne 0) {
-    Write-Host "==> 取不到官方最新（网络/代理？），不合并。" -ForegroundColor Red
-    $fetch.Output | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
-    exit 1
+# 只有合并真正的 upstream/main 才需要先确认官方资料是新的。
+# 用 -Ref 指向别的 ref（本地分支、临时 ref）时不必联网，也不该被网络挡住。
+if ($Ref -eq "upstream/main") {
+    $fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
+    if ($fetch.Code -ne 0) {
+        Write-Host "==> 取不到官方最新（网络/代理？），不合并。" -ForegroundColor Red
+        $fetch.Output | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
+        Write-Host "  网络恢复后再跑；只是想合并本地 ref 的话用 -Ref 指定。" -ForegroundColor Yellow
+        exit 1
+    }
+} else {
+    Write-Host "==> 合并的是 $Ref（不是 upstream/main），跳过联网检查。" -ForegroundColor Yellow
 }
 
 $behind = [int]((Invoke-Git -Arguments @("rev-list", "--count", "$branch..$Ref")).Output |
