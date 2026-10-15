@@ -8,11 +8,15 @@
     .\scripts\check_upstream.ps1                 # 只看，落后就提示
     .\scripts\check_upstream.ps1 -Merge          # 落后就自动合并
     .\scripts\check_upstream.ps1 -Merge -Push    # 合并完顺手推到自己的 fork
+
+fetch 不成功时脚本会挡住（exit 1）：那时候说「已经是最新版」是骗自己，
+本地这份官方资料可能已经旧了。确实要硬着头皮继续才加 -AllowStale。
 #>
 [CmdletBinding()]
 param(
     [switch]$Merge,
     [switch]$Push,
+    [switch]$AllowStale,
     [string]$Python = ''
 )
 
@@ -64,24 +68,62 @@ if ($dirty) {
 
 Write-Host "==> 取官方最新（fetch upstream）..."
 $fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
-if ($fetch.Code -ne 0) {
-    Write-Host "  连不上官方仓库（网络/代理？）。下面是本地已有的资料：" -ForegroundColor Yellow
-    $fetch.Output | ForEach-Object { Write-Host "  $_" }
-} else {
+$fetchOk = ($fetch.Code -eq 0)
+if ($fetchOk) {
     $fetch.Output | Where-Object { $_ -match '\S' } | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
+} else {
+    Write-Host "  连不上官方仓库（网络/代理？）：" -ForegroundColor Red
+    $fetch.Output | ForEach-Object { Write-Host "  $_" }
+}
+
+# 本次结果的「新鲜度」：从 FETCH_HEAD 的写入时间看官方资料有多旧。
+$freshness = ""
+$headPath = Join-Path $workspace ".git\FETCH_HEAD"
+if (Test-Path -LiteralPath $headPath) {
+    $age = (Get-Date) - (Get-Item -LiteralPath $headPath).LastWriteTime
+    if ($age.TotalMinutes -lt 1) {
+        $freshness = "刚刚"
+    } elseif ($age.TotalHours -lt 1) {
+        $freshness = "$([int]$age.TotalMinutes) 分钟前"
+    } else {
+        $freshness = "$([math]::Round($age.TotalHours, 1)) 小时前"
+    }
+}
+if (-not $fetchOk) {
+    # fetch 失败时 upstream/main 还停在旧位置，说「已是最新」就是骗自己：
+    # 那会让人以为可以动手改，其实没看过官方最新。这里必须挡住。
+    Write-Host ""
+    Write-Host "==> 没有取到官方最新，无法判断你是不是在最新版上。" -ForegroundColor Red
+    if ($freshness) {
+        Write-Host "  本地这份官方资料是 $freshness 的（.git\FETCH_HEAD）。" -ForegroundColor Yellow
+    }
+    Write-Host "  请先让网络/代理恢复正常再跑一次。也可以用 -AllowStale 硬着头皮继续，" -ForegroundColor Yellow
+    Write-Host "  但那样不保证改动是基于官方最新版。" -ForegroundColor Yellow
+    if (-not $AllowStale) {
+        exit 1
+    }
+    Write-Host "  （已指定 -AllowStale，下面用本地这份旧资料继续。）" -ForegroundColor Yellow
 }
 
 $behind = [int]((Invoke-Git -Arguments @("rev-list", "--count", "$branch..upstream/main")).Output | Select-Object -First 1)
 $ahead = [int]((Invoke-Git -Arguments @("rev-list", "--count", "upstream/main..$branch")).Output | Select-Object -First 1)
 
 Write-Host ""
-Write-Host "==> 与 upstream/main 的差距"
+if ($freshness -and $fetchOk) {
+    Write-Host "==> 与 upstream/main 的差距（官方资料: $freshness）"
+} else {
+    Write-Host "==> 与 upstream/main 的差距（本地旧资料，未取到官方最新）"
+}
 Write-Host "  你领先: $ahead 个提交（你自己的改动）"
 Write-Host "  你落后: $behind 个提交（官方的新内容）"
 
 if ($behind -eq 0) {
     Write-Host ""
-    Write-Host "==> 已经是最新版，可以直接动手改。" -ForegroundColor Green
+    if ($fetchOk) {
+        Write-Host "==> 已经是最新版，可以直接动手改。" -ForegroundColor Green
+    } else {
+        Write-Host "==> 没取到官方最新，只能说「本地这份资料里没有更新的」。" -ForegroundColor Yellow
+    }
     exit 0
 }
 
