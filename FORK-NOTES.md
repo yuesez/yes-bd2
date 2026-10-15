@@ -25,9 +25,8 @@ cd D:\YES-BD2
 # 1. 动手前：看官方有没有更新（这一步是规矩，别跳过）
 .\scripts\check_upstream.ps1
 
-#    落后了就合进来，然后跑一次测试确认没被官方改坏
-.\scripts\check_upstream.ps1 -Merge
-.\scripts\run_checks.ps1 -Mode Final
+#    落后了就合进来（这个脚本会自己跑前后两遍测试来确认没被改坏）
+.\scripts\merge_upstream_safely.ps1
 
 # 2. 改东西
 #    ...
@@ -46,21 +45,35 @@ git push
 
 `check_upstream.ps1` 也可以顺手推：`.\scripts\check_upstream.ps1 -Merge -Push`。
 
-## 两个脚本的分工
+## ⚠️ `run_checks.ps1 -Mode Final` 现在会失败，这不是你的问题
+
+实测（2026-10-15）：**官方纯净的 `main` 自己就有 164 个 lint 错误**——123 个
+`E501`（行超 100 字符）+ 28 个 `I001`（import 未排序），散在约 40 个文件里。
+也就是说官方自己过不了自己 CI 里的 `ruff check .`，那道关卡永远亮红。
+
+所以**不要**用它来判断「我的改动有没有把东西改坏」——它失败不说明任何事。
+要用「前后对比」：合并前后各跑一遍全量测试，只要没有**新的**失败就是干净的。
+`merge_upstream_safely.ps1` 就是干这个的。
+
+## 三个脚本的分工
 
 | 脚本 | 什么时候跑 | 做什么 |
 |---|---|---|
-| `scripts\check_upstream.ps1` | **动手改之前**（规矩） | 看官方有没有新提交；`-Merge` 就合进来 |
+| `scripts\check_upstream.ps1` | **动手改之前**（规矩） | 看官方有没有新提交；`-AllowStale` 见下 |
+| `scripts\merge_upstream_safely.ps1` | 真的落后、要合并时（用这个代替 `-Merge`） | 前后各跑一遍全量测试并对比，确认没引入新失败 |
 | `scripts\check_custom_changes.ps1` | 合并后、同步安装版后 | 查自己的改动有没有被覆盖掉 |
 
 `check_upstream.ps1` 在**取不到官方最新时会挡住**（exit 1）：网络/代理不通的时候，
 说「已经是最新版」是骗自己——本地那份官方资料可能已经旧了。这种情况先修好网络再跑。
 确实要硬着头皮继续才加 `-AllowStale`，那时它会明说「这只是本地旧资料里没有更新的」。
 
-第二个脚本不用维护清单：它用 `git diff upstream/main...HEAD` 自己算出你改了哪些
-文件，再逐个比对源码版和安装版。以后你再加新功能，它自动把新文件也算进去。
-只有 `src\` 下的 `.py` 会被当成「必须一致」——文档、脚本、测试、`run.bat` 不影响
-工具运行，安装版里没有它们不算问题。
+`merge_upstream_safely.ps1` 里的 `-Ref` 默认是 `upstream/main`，一般不用管；
+`-SkipTests` 跳过测试（快但没验证），`-Push` 验证通过后顺手推。
+
+`check_custom_changes.ps1` 不用维护清单：它用 `git diff upstream/main...HEAD` 自己
+算出你改了哪些文件，再逐个比对源码版和安装版。以后你再加新功能，它自动把新文件也
+算进去。只有 `src\` 下的 `.py` 会被当成「必须一致」——文档、脚本、测试、`run.bat`
+不影响工具运行，安装版里没有它们不算问题。
 
 ## 为什么必须先合再改
 
