@@ -1,6 +1,7 @@
 """Map-trade navigator tests (split from test_map_trade.py)."""
 
 import unittest
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ from src.tasks.map_trade.navigator_constants import (
 )
 from src.tasks.map_trade.vision import Vision
 from src.utils.press_confirm import press_and_confirm
+from src.utils.wait_limits import STUCK_SECONDS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1584,6 +1586,90 @@ class CollectionPageSeekTest(unittest.TestCase):
         self.assertIsInstance(result, NavigationResult)
         self.assertFalse(result.success)
 
+    def _q_ep2_pages(self):
+        """Nightmare Winter's teleport pages, left to right: the safe zone
+        雷瓦汀据点 is the LAST page (Leo 2026-10-15)."""
+        card = CARD_BY_ID["Q_ep2"]
+        by_key = {target.key: target for target in card.targets}
+        main = CollectionMapRole.MAIN_AREA.value
+        battle_1 = CollectionMapRole.BATTLE_AREA_1.value
+        battle_2 = CollectionMapRole.BATTLE_AREA_2.value
+        pages = [
+            self.ctx("战斗Ⅰ 恶梦之城1", battle_1, right=True),
+            self.ctx("战斗Ⅱ 恶梦之城2", battle_2, left=True, right=True),
+            self.ctx("安全 雷瓦汀据点", main, left=True),
+        ]
+        return card, by_key, pages
+
+    def _attempt_navigator(self, pages, start):
+        """As ``_navigator``, but records every direction tried, also the
+        ones that hit the end of the list."""
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        position = [start]
+        attempts = []
+
+        def move(_card, _context, direction):
+            attempts.append(direction)
+            step = 1 if direction == "right" else -1
+            if not 0 <= position[0] + step < len(pages):
+                return None
+            position[0] += step
+            return pages[position[0]]
+
+        navigator._move_area_map = move
+        return navigator, attempts
+
+    def test_q_ep2_safe_zone_is_the_last_page_so_battle_maps_are_left(self):
+        # Live 2K 2026-10-15: from 雷瓦汀据点 the right arrow was pressed
+        # twice (~20 s) before going left (Leo 「活動卡帶第2的安全區是第三張地圖
+        # 要切換的時候螢幕不要再點右邊箭頭了」).
+        card, by_key, pages = self._q_ep2_pages()
+        navigator, attempts = self._attempt_navigator(pages, 2)
+
+        found = navigator._seek_collection_page(
+            card, pages[2], by_key[CollectionMapRole.BATTLE_AREA_1.value]
+        )
+
+        self.assertEqual(CollectionMapRole.BATTLE_AREA_1.value, found.resolved_target_key)
+        self.assertEqual(["left", "left"], attempts)
+
+    def test_q_ep2_battle_two_is_one_page_left_of_the_safe_zone(self):
+        card, by_key, pages = self._q_ep2_pages()
+        navigator, attempts = self._attempt_navigator(pages, 2)
+
+        found = navigator._seek_collection_page(
+            card, pages[2], by_key[CollectionMapRole.BATTLE_AREA_2.value]
+        )
+
+        self.assertEqual(CollectionMapRole.BATTLE_AREA_2.value, found.resolved_target_key)
+        self.assertEqual(["left"], attempts)
+
+    def test_q_ep2_back_to_the_safe_zone_goes_right(self):
+        card, by_key, pages = self._q_ep2_pages()
+        navigator, attempts = self._attempt_navigator(pages, 0)
+
+        found = navigator._seek_collection_page(
+            card, pages[0], by_key[CollectionMapRole.MAIN_AREA.value]
+        )
+
+        self.assertEqual(CollectionMapRole.MAIN_AREA.value, found.resolved_target_key)
+        self.assertEqual(["right", "right"], attempts)
+
+    def test_story_cards_keep_the_safe_zone_as_the_first_page(self):
+        card = CARD_BY_ID["Q_sp4"]
+        self.assertEqual(
+            tuple(target.key for target in card.targets),
+            Navigator._collection_page_order(card),
+        )
+        self.assertEqual(
+            (
+                CollectionMapRole.BATTLE_AREA_1.value,
+                CollectionMapRole.BATTLE_AREA_2.value,
+                CollectionMapRole.MAIN_AREA.value,
+            ),
+            Navigator._collection_page_order(CARD_BY_ID["Q_ep2"]),
+        )
+
 
 class SmallMinimapTest(unittest.TestCase):
     def test_enlarged_minimap_is_switched_back(self):
@@ -1693,11 +1779,17 @@ class FieldWaitTest(unittest.TestCase):
     """Leo 2026-09-30: a stall ends after 15 s, not 45; walking is no stall."""
 
     @staticmethod
-    def _navigator(states, *, moving):
+    def _navigator(states, *, moving, still=False):
         clock = [0.0]
         states = iter(states)
         task = SimpleNamespace(sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
-        vision = SimpleNamespace(capture=lambda: np.zeros((10, 10, 3), np.uint8))
+        # A walk pans the field: every look differs (``still`` keeps it fixed).
+        looks = iter(range(10**6))
+        vision = SimpleNamespace(
+            capture=lambda: np.full(
+                (80, 80, 3), 0 if still else 60 * (next(looks) % 2), np.uint8
+            )
+        )
         navigator = Navigator(task, vision)
         navigator.classify = lambda _frame: next(states)
         navigator._auto_moving = lambda _frame: moving
@@ -1716,6 +1808,16 @@ class FieldWaitTest(unittest.TestCase):
         navigator, clock = self._navigator(states, moving=True)
 
         self.assertTrue(self._wait(navigator, clock).success)
+
+    def test_a_walk_whose_screen_stands_still_is_a_stall(self):
+        # Leo 2026-10-14 「頂多等8秒到10秒」: the 自动移动中 banner up but the
+        # field not moving no longer holds the wait.
+        navigator, clock = self._navigator(
+            [ScreenState.UNKNOWN] * 1000, moving=True, still=True
+        )
+
+        self.assertFalse(self._wait(navigator, clock).success)
+        self.assertLessEqual(clock[0], 15.5 + STUCK_SECONDS)
 
     def test_a_stall_ends_at_the_limit(self):
         navigator, clock = self._navigator([ScreenState.UNKNOWN] * 200, moving=False)
@@ -2090,3 +2192,131 @@ class LostPressTest(unittest.TestCase):
 
         self.assertIsNone(changed)
         self.assertEqual(2, len(presses))
+
+
+class TeleportPageEndTest(unittest.TestCase):
+    """Q_ep2 live 2K 2026-10-15: on its last page (the safe zone 雷瓦汀据点)
+    the read showed left=True, right=False, yet the right arrow was pressed
+    twice (~20 s) before the seek went left (Leo 2026-10-15 「活動卡帶第2的
+    安全區是第三張地圖 要切換的時候螢幕不要再點右邊箭頭了」)."""
+
+    _run = LostPressTest._run
+    _page_navigator = LostPressTest._page_navigator
+    LEFT = MatchResult(0.99, (360, 500), (40, 40), pixel_score=0.98)
+    RIGHT = MatchResult(0.99, (1520, 500), (40, 40), pixel_score=0.98)
+
+    def _page(self, text, key, *, left, right):
+        return replace(
+            NavigatorTest._area_context(text, key),
+            left_arrow=self.LEFT if left else None,
+            right_arrow=self.RIGHT if right else None,
+        )
+
+    def _game(self, start, *, bare_reads=0):
+        """A fake Q_ep2 teleport map: presses left of the screen centre turn
+        one page left, right of it one page right (nothing past the ends).
+        The first ``bare_reads`` reads show no arrows (not drawn yet)."""
+        card = CARD_BY_ID["Q_ep2"]
+        main = CollectionMapRole.MAIN_AREA.value
+        battle_1 = CollectionMapRole.BATTLE_AREA_1.value
+        battle_2 = CollectionMapRole.BATTLE_AREA_2.value
+        pages = [
+            ("战斗Ⅰ 恶梦之城1", battle_1),
+            ("战斗Ⅱ 恶梦之城2", battle_2),
+            ("安全 雷瓦汀据点", main),
+        ]
+        clock = FakeClock()
+        position = [start]
+        presses = []
+        reads = [0]
+
+        def read(_card):
+            reads[0] += 1
+            text, key = pages[position[0]]
+            bare = reads[0] <= bare_reads
+            return self._page(
+                text,
+                key,
+                left=not bare and position[0] > 0,
+                right=not bare and position[0] < len(pages) - 1,
+            )
+
+        def press(point, _shape, after_sleep=0):
+            direction = "left" if point[0] < 960 else "right"
+            presses.append(direction)
+            step = 1 if direction == "right" else -1
+            if 0 <= position[0] + step < len(pages):
+                position[0] += step
+
+        navigator = Navigator(
+            SimpleNamespace(sleep=clock.sleep, info_set=lambda *_a: None),
+            SimpleNamespace(click_client=press),
+        )
+        navigator._capture_area_map_context = read
+        return card, navigator, presses, clock, read
+
+    def test_the_missing_right_arrow_is_never_pressed(self):
+        card, navigator, presses, clock, read = self._game(2)
+        safe = read(card)
+        self.assertIsNone(safe.right_arrow)
+        self.assertIsNotNone(safe.left_arrow)
+
+        changed = self._run(clock, lambda: navigator._move_area_map(card, safe, "right"))
+
+        self.assertIsNone(changed)
+        self.assertEqual([], presses)
+
+    def test_an_arrow_still_fading_in_is_pressed_on_the_second_read(self):
+        card, navigator, presses, clock, read = self._game(1)
+        page = read(card)
+        fading = replace(page, right_arrow=None)
+
+        changed = self._run(clock, lambda: navigator._move_area_map(card, fading, "right"))
+
+        self.assertEqual(CollectionMapRole.MAIN_AREA.value, changed.resolved_target_key)
+        self.assertEqual(["right"], presses)
+
+    def test_a_blind_press_stops_once_only_the_other_arrow_shows(self):
+        # The 09:26:38 read: left=False and right=False (arrows not drawn
+        # yet), so the right arrow's fixed place was pressed; the next reads
+        # showed left only and it still waited out a second press.
+        card, navigator, presses, clock, read = self._game(2, bare_reads=1)
+        bare = read(card)
+        self.assertIsNone(bare.left_arrow)
+        self.assertIsNone(bare.right_arrow)
+
+        changed = self._run(clock, lambda: navigator._move_area_map(card, bare, "right"))
+
+        self.assertIsNone(changed)
+        self.assertEqual(["right"], presses)
+        self.assertLess(clock.now, 3.0)
+
+    def test_q_ep2_from_the_safe_zone_presses_only_left(self):
+        card, navigator, presses, clock, read = self._game(2, bare_reads=1)
+        safe = read(card)  # both arrows missing, as at 09:26:38
+        target = next(
+            item for item in card.targets if item.key == CollectionMapRole.BATTLE_AREA_1.value
+        )
+
+        found = self._run(
+            clock, lambda: navigator._seek_collection_page(card, safe, target)
+        )
+
+        self.assertEqual(CollectionMapRole.BATTLE_AREA_1.value, found.resolved_target_key)
+        self.assertEqual(["left", "left"], presses)
+        self.assertNotIn("right", presses)
+
+    def test_story_card_safe_zone_still_pages_right(self):
+        card = CARD_BY_ID["Q_sp2"]
+        town = self._page("安全 达雷普镇", card.targets[0].key, left=False, right=True)
+        battle = self._page("战斗Ⅰ 封锁矿山", card.targets[1].key, left=True, right=True)
+        navigator, presses, clock = self._page_navigator(
+            lambda pressed: battle if pressed else town
+        )
+
+        found = self._run(
+            clock, lambda: navigator._seek_collection_page(card, town, card.targets[1])
+        )
+
+        self.assertIs(battle, found)
+        self.assertEqual([self.RIGHT.center], presses)

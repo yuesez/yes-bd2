@@ -136,6 +136,8 @@ from src.tasks.map_trade.navigator_constants import (
     TELEPORT_MAP_TITLE_OCR_RELATIVE_ROI,
     TELEPORT_LOADING_DARK_P95,
     TELEPORT_MAP_TRAVEL_SETTLE_SECONDS,
+    TELEPORT_PAGE_END_READS,
+    TELEPORT_PAGE_ORDER,
     TOWN_NPC_NAV_ENTRY,
     TRADE_CARD_SANDBOX_HITS,
     WALK_CAUGHT_KEYWORDS,
@@ -152,6 +154,7 @@ from src.tasks.map_trade.vision import normalize_text
 from src.utils.calibration import FHD_1080
 from src.utils.field_followers import dismiss_once_per_run
 from src.utils.press_confirm import press_and_confirm
+from src.utils.wait_limits import STUCK_SECONDS, StillTimer
 
 
 # Field status text after a map click: '自动移动中：魔法阵' (bottom centre) and
@@ -918,6 +921,9 @@ class SandboxNavigationMixin:
         last_state = ScreenState.UNKNOWN
         frame = None
         grace_used = False
+        # Loading and walking only hold the wait while the screen moves: one
+        # still for STUCK_SECONDS is stuck (Leo 2026-10-14 「頂多等8秒到10秒」).
+        still = StillTimer()
         while True:
             if monotonic() > end_at:
                 if hits == 0 or grace_used:
@@ -945,7 +951,9 @@ class SandboxNavigationMixin:
                 hits = 0
                 # A loading screen is progress too (audit #10: on a slow PC the
                 # loading used up the stall and the entry was judged failed).
-                if last_state == ScreenState.LOADING or self._auto_moving(frame):
+                if (
+                    last_state == ScreenState.LOADING or self._auto_moving(frame)
+                ) and still.still_for(frame, monotonic()) < STUCK_SECONDS:
                     end_at = min(max(end_at, monotonic() + stall), walk_cap)
                 if handle_intermediate and last_state != ScreenState.LOADING:
                     handled = self._handle_story_card_intermediate(frame)
@@ -963,10 +971,11 @@ class SandboxNavigationMixin:
         timeout: float | None = None,
         interval: float = 0.5,
     ) -> NavigationResult:
-        wait_seconds = self._loading_timeout() if timeout is None else float(timeout)
-        deadline = monotonic() + max(0.0, wait_seconds)
+        wait_seconds = max(0.0, self._loading_timeout() if timeout is None else float(timeout))
+        deadline = monotonic() + wait_seconds
         for attempt in range(2):
-            remaining = max(0.0, deadline - monotonic())
+            # Capped at the budget: deadline - now can round a hair above it.
+            remaining = min(wait_seconds, max(0.0, deadline - monotonic()))
             if attempt:
                 # The page was dismissed: the field shows in a moment.
                 remaining = max(remaining, STORY_ENTRY_AFTER_PAGE_SECONDS)
@@ -986,7 +995,7 @@ class SandboxNavigationMixin:
             # A dialog that may spend something stops here, not retried.
             if result.success or attempt or result.message == FIRST_CARD_PAID_DIALOG_MESSAGE:
                 return result
-            remaining = max(0.0, deadline - monotonic())
+            remaining = min(wait_seconds, max(0.0, deadline - monotonic()))
             if remaining <= 0.0:
                 return result
             if self.task._handle_recent_cartridge_special_pages(
@@ -1338,10 +1347,18 @@ class SandboxNavigationMixin:
         soon as a patrol stops the walk, "timeout" when it never ends."""
         end_at = monotonic() + max(0.0, timeout)
         idle = 0
+        still = StillTimer()
         while monotonic() <= end_at:
-            state = self._walk_state(self.vision.capture())
+            frame = self.vision.capture()
+            state = self._walk_state(frame)
             if state == "caught":
                 return state
+            if state == "moving" and still.still_for(frame, monotonic()) >= STUCK_SECONDS:
+                # The banner is up but nothing moves: the walk stopped.
+                self._status(
+                    "导航状态", f"自动移动中但画面 {STUCK_SECONDS:.0f} 秒没动，当作卡住"
+                )
+                return "timeout"
             if state == "idle":
                 idle += 1
                 if idle >= AUTO_MOVE_IDLE_READS:
@@ -1360,8 +1377,14 @@ class SandboxNavigationMixin:
 
         end_at = monotonic() + max(0.0, timeout)
         idle = 0
+        still = StillTimer()
         while monotonic() <= end_at:
             frame = self.vision.capture()
+            if still.still_for(frame, monotonic()) >= STUCK_SECONDS:
+                self._status(
+                    "导航状态", f"画面 {STUCK_SECONDS:.0f} 秒没动，不再等自动移动，继续确认地图"
+                )
+                return
             if self._black_frame(frame):
                 idle = 0
                 self._status("导航状态", "加载中，等待自动移动继续")
@@ -2194,7 +2217,9 @@ class SandboxNavigationMixin:
 
         if context.resolved_target_key == target.key:
             return context
-        keys = [item.key for item in card.targets]
+        # Page order, not collection order: Q_ep2's safe zone is the last
+        # page, so its battle maps are to the left (Leo 2026-10-15).
+        keys = list(self._collection_page_order(card))
         if context.resolved_target_key in keys:
             ahead = keys.index(target.key) > keys.index(context.resolved_target_key)
             directions = ("right", "left") if ahead else ("left", "right")
@@ -2221,6 +2246,17 @@ class SandboxNavigationMixin:
             ScreenState.AREA_MAP,
             f"传送阵地图左右翻页都未找到{target.title}：last={start.raw_text or '-'}",
         )
+
+    @staticmethod
+    def _collection_page_order(card: CardSpec) -> tuple[str, ...]:
+        """The card's target keys in teleport-map page order (left to right):
+        ``card.targets`` (safe zone first) unless TELEPORT_PAGE_ORDER says
+        otherwise (Q_ep2's safe zone is the last page, Leo 2026-10-15)."""
+        keys = tuple(item.key for item in card.targets)
+        order = TELEPORT_PAGE_ORDER.get(card.card_id)
+        if order and sorted(order) == sorted(keys):
+            return order
+        return keys
 
     def _reset_collection_teleport_map_to_main(
         self,
@@ -2971,6 +3007,22 @@ class SandboxNavigationMixin:
         context: AreaMapContext,
         direction: str,
     ) -> AreaMapContext | None:
+        label = f"区域地图{'向右' if direction == 'right' else '向左'}翻页"
+        if self._area_map_page_end(context, direction):
+            # Only the other arrow shows: this is the end of the list, and
+            # pressing the missing arrow's place cost ~20 s on Q_ep2's last
+            # page (Leo 2026-10-15 「活動卡帶第2的安全區是第三張地圖 要切換的時候
+            # 螢幕不要再點右邊箭頭了」).  One more read first, as an arrow can
+            # still be fading in right after a page turn.
+            state, fresh = self._area_map_page_state(card, context)
+            if state == "unknown":
+                return None
+            if state == "moved":
+                return fresh  # a late turn landed meanwhile: that is the move
+            if self._area_map_page_end(fresh, direction):
+                self._status("区域地图", f"{label}：这一侧没有箭头，已是尽头，不按")
+                return None
+            context = fresh
         arrow = context.right_arrow if direction == "right" else context.left_arrow
         if arrow is not None:
             center = arrow.center
@@ -2983,18 +3035,28 @@ class SandboxNavigationMixin:
             center = (round(x * width / 1920), round(y * height / 1080))
         else:
             return None
+        blind = arrow is None
         pages: list[AreaMapContext] = []
+        end_reads: list[AreaMapContext] = []
 
         def moved() -> bool:
             state, current = self._area_map_page_state(card, context)
             if state == "moved":
                 pages.append(current)
-            return state == "moved"
+                return True
+            # A blind press (no arrow seen, e.g. read before the arrows were
+            # drawn, live 2K 2026-10-15) ends early once the unchanged page
+            # shows only the other arrow, instead of waiting out two presses.
+            if blind and state == "same" and self._area_map_page_end(current, direction):
+                end_reads.append(current)
+                return len(end_reads) >= TELEPORT_PAGE_END_READS
+            end_reads.clear()
+            return False
 
         # One dropped press read as the end of the list and turned the seek
         # round (or failed it): pressed once more while the page stays.
         flipped = press_and_confirm(
-            f"区域地图{'向右' if direction == 'right' else '向左'}翻页",
+            label,
             lambda: self.vision.click_client(
                 center,
                 context.frame_shape,
@@ -3007,7 +3069,18 @@ class SandboxNavigationMixin:
             sleep=self.task.sleep,
             log=lambda message: self._status("区域地图", message),
         )
+        if flipped and not pages:
+            self._status("区域地图", f"{label}：页面没变且这一侧没有箭头，已是尽头")
+            return None
         return pages[-1] if flipped else None
+
+    @staticmethod
+    def _area_map_page_end(context: AreaMapContext, direction: str) -> bool:
+        """The page shows the other arrow but not ``direction``'s: the end of
+        the list that way (both missing says nothing: bright pages hide them)."""
+        if direction == "right":
+            return context.right_arrow is None and context.left_arrow is not None
+        return context.left_arrow is None and context.right_arrow is not None
 
     def _close_area_map(self, context: AreaMapContext) -> NavigationResult:
         if not context.map_page_mode.is_teleport_map:

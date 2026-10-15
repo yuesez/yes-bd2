@@ -80,6 +80,7 @@ from src.utils.junk_gear import (
 )
 from src.utils.ocr_utils import normalize_ocr_text
 from src.utils.press_confirm import SLOW_PC_GRACE_SECONDS, wait_for
+from src.utils.wait_limits import STUCK_SECONDS
 
 # 1920x1080 reference coordinates / ROIs.
 SORT_BUTTON_POINT = (1777, 100)
@@ -124,8 +125,10 @@ SELECTION_CONFIRM_POINT = (1777, 1005)
 BOTTOM_RIGHT_BUTTON_ROI = (1590, 970, 220, 70)
 # Character art on the left: closes the result overlay without hitting a cell.
 NEUTRAL_TAP_POINT = (560, 140)
-# No result text read this long after 开始强化: one tap on blank space.
-RESULT_BLIND_TAP_SECONDS = 12.0
+# No result text read this long after 开始强化: one tap on blank space
+# (Leo 2026-10-14 「頂多等8秒到10秒」: was 12 s, with 30 s in all; now each
+# step without progress ends after STUCK_SECONDS).
+RESULT_BLIND_TAP_SECONDS = 8.0
 DETAIL_READ_RETRIES = 3
 # A junk verdict is read twice this far apart: a 穿戴中 tag or lock drawn late
 # on a slow PC would otherwise send the item to auto-dismantle.
@@ -386,7 +389,7 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
             "一键日常里紧接免费抽抽乐时，先只处理带黄色!的新装备，不动背包筛选和排序；"
             "没有拆到时，背包先筛选出 R、再筛选出 SR（按获得时间排序），看最前面几件："
             "强化到 +7 并自动分解；"
-            "SR 会点开核对，只拆 3★/4★ 角色专用的（5★ 角色的可在设定里选）；"
+            "SR 会点开核对，只拆 3★/4★ 角色专用的；设定里开启 5★ 后，SR 不点开直接拆；"
             "上锁、穿戴中、已强化的一律保留，UR 不碰。"
             "背包筛选和排序会改回原样。"
             "没有可分解的爛装时，做一件 N 装备强化后分解（每日任务）。"
@@ -405,7 +408,10 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
                 "最多处理件数": (
                     "整次最多处理几件（黄色!新装备、R、SR 和 N 装备都算在内），1~10 件。"
                 ),
-                FIVE_STAR_SR_KEY: "开启后，5★ 角色的 SR 专用装备也会分解；关闭时保留（默认）。",
+                FIVE_STAR_SR_KEY: (
+                    "开启后，SR 不点开，和 R 一样直接分解；"
+                    "关闭时点开核对，5★ 角色的保留（默认）。"
+                ),
             }
         )
         # 1-10 items per run (user, 2026-09-27).
@@ -1179,8 +1185,9 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
                 report.append(f"{where}:保留[格子稀有度{rarity or '认不出'}]")
                 self._kept_reasons.append(rarity or "稀有度认不出")
                 continue
-            if wanted not in OPENED_GRADES:
-                # R is junk off the grid (Leo 2026-10-11 「r不點開」).
+            if wanted not in OPENED_GRADES or five_star_sr:
+                # R is junk off the grid (Leo 2026-10-11 「r不點開」); SR too
+                # with 5★ let go (Leo 2026-10-15 「我的意思就是你直接拆sr」).
                 report.append(f"{where}:爛装[格子{wanted}]")
                 junk.append((row, column))
                 continue
@@ -1487,10 +1494,11 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
 
     def _settle_enhance_result(self, planned: int) -> bool:
         started = monotonic()
-        end_at = started + 30.0
+        progress_at = started  # the last result read or tap
         seen_result = False
         blind_tap = False
-        while monotonic() <= end_at:
+        # A result that keeps coming back after its tap is still bounded.
+        while monotonic() - progress_at <= STUCK_SECONDS and monotonic() - started <= 30.0:
             boxes = self._roi_boxes(self.capture_frame(), RESULT_ROI, "强化结果")
             text = normalize_ocr_text(self._boxes_text(boxes))
             if "分解" in text and ("结果" in text or "已分解" in text):
@@ -1502,6 +1510,7 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
                         f"爛装强化分解：结果显示分解 {match.group(1)} 件，计划 {planned} 件。"
                     )
                 self._click_reference(*NEUTRAL_TAP_POINT, after_sleep=1.2)
+                progress_at = monotonic()
                 continue
             frame = self.capture_frame()
             if (seen_result or blind_tap) and self._title_visible(
@@ -1518,6 +1527,7 @@ class JunkGearTask(BagFilterMixin, NGearCraftMixin, EnhanceDialogMixin, DailyRef
                 # closes on a tap on blank space; on the bag it is the art.
                 blind_tap = True
                 self._click_reference(*NEUTRAL_TAP_POINT, after_sleep=1.2)
+                progress_at = monotonic()
                 continue
             self.sleep(0.8)
         self.log_info("爛装强化分解：未确认强化分解结果。")

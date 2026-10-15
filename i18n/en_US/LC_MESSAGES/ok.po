@@ -955,8 +955,8 @@ msgstr "Recipe list"
 msgid "料酒"
 msgstr "Cooking Wine"
 
-msgid "开启后，5★ 角色的 SR 专用装备也会分解；关闭时保留（默认）。"
-msgstr "When on, SR Exclusive Gear of 5★ Characters is dismantled too; when off it is kept (default)."
+msgid "开启后，SR 不点开，和 R 一样直接分解；关闭时点开核对，5★ 角色的保留（默认）。"
+msgstr "When on, SR is dismantled without opening it, like R; when off it is opened and checked, and 5★ Characters' is kept (default)."
 
 msgid "日"
 msgstr "Sun"
@@ -1522,8 +1522,8 @@ msgstr "What to buy, which dishes to cook and what to sell each day are set ther
 msgid "出售日历"
 msgstr "Sale calendar"
 
-msgid "一键日常里紧接免费抽抽乐时，先只处理带黄色!的新装备，不动背包筛选和排序；没有拆到时，背包先筛选出 R、再筛选出 SR（按获得时间排序），看最前面几件：强化到 +7 并自动分解；SR 会点开核对，只拆 3★/4★ 角色专用的（5★ 角色的可在设定里选）；上锁、穿戴中、已强化的一律保留，UR 不碰。背包筛选和排序会改回原样。没有可分解的爛装时，做一件 N 装备强化后分解（每日任务）。"
-msgstr "Right after the free Gacha in Daily One-Click, it first handles only the new Gear with the yellow !, leaving the bag filter and sort as they are. If none is dismantled, it filters the bag to R, then SR (sorted by time acquired), and checks the Gear at the front: it is upgraded to +7 and dismantled automatically. SR is opened and checked first, and only 3★/4★ Characters' Exclusive Gear is dismantled (5★ Characters' can be chosen in the settings); locked, equipped or already upgraded Gear is always kept, and UR is never touched. The bag filter and sort are put back afterwards. With nothing to dismantle, one N Gear is crafted, upgraded and dismantled (daily mission)."
+msgid "一键日常里紧接免费抽抽乐时，先只处理带黄色!的新装备，不动背包筛选和排序；没有拆到时，背包先筛选出 R、再筛选出 SR（按获得时间排序），看最前面几件：强化到 +7 并自动分解；SR 会点开核对，只拆 3★/4★ 角色专用的；设定里开启 5★ 后，SR 不点开直接拆；上锁、穿戴中、已强化的一律保留，UR 不碰。背包筛选和排序会改回原样。没有可分解的爛装时，做一件 N 装备强化后分解（每日任务）。"
+msgstr "Right after the free Gacha in Daily One-Click, it first handles only the new Gear with the yellow !, leaving the bag filter and sort as they are. If none is dismantled, it filters the bag to R, then SR (sorted by time acquired), and checks the Gear at the front: it is upgraded to +7 and dismantled automatically. SR is opened and checked first, and only 3★/4★ Characters' Exclusive Gear is dismantled ; with 5★ turned on in the settings, SR is dismantled without opening it; locked, equipped or already upgraded Gear is always kept, and UR is never touched. The bag filter and sort are put back afterwards. With nothing to dismantle, one N Gear is crafted, upgraded and dismantled (daily mission)."
 
 msgid "每日按配置依次执行购买、制作料理和出售。"
 msgstr "Each day, buys, cooks and sells in order, as configured."
@@ -2823,6 +2823,7 @@ msgstr ""
 
 msgid "帮我关掉"
 msgstr "Turn it off for me"
+
 msgid "游戏现在是全屏，会自己撑满整个屏幕（{size}），工具改不了它的大小。请在游戏里打开 设置 → 图像 → 画面模式，改成「窗口模式」，再按「调整」。"
 msgstr "The game is in full screen and keeps filling the whole screen ({size}), so the tool can't resize it. In the game, open Settings → Graphics → Screen Mode, choose Windowed, then press Resize again."
 
@@ -2831,3 +2832,256 @@ msgstr "Wait after recognition (seconds)"
 
 msgid "认出按钮后，点下去之前等多久（秒）。"
 msgstr "How long to wait after a button is recognized before pressing it (seconds)."
+
+msgid "只刷普通难度"
+msgstr "Normal only"
+
+msgid "挑战战斗最高关卡"
+msgstr "Highest Challenge stage"
+
+msgid "完全不打挑战战斗；普通战斗通关后，剩下的AP用快速战斗刷普通战斗15。"
+msgstr "Skips Challenge Battle entirely; once Normal Battle is cleared, the AP left goes to Quick Battle on Normal Battle 15."
+
+msgid "挑战战斗只推到这一关（快速战斗只有第5、10、15关）；到了之后剩下的AP用快速战斗刷这一关。"
+msgstr "Challenge Battle is only pushed up to this stage (Quick Battle exists only on stages 5, 10 and 15); after that, the AP left goes to Quick Battle on this stage."
+
+msgid "推不动时（都通关或到了设定的关卡），剩下的AP用快速战斗刷那一关；打输了就直接回主页。"
+msgstr "When it can't push further (all cleared or the set stage reached), the AP left goes to Quick Battle on that stage; after a lost battle it goes straight back to the home screen."
+
+msgid "连不上桌面分身（Windows 代码 {code}），不是密码的问题。请依序试：重开工具再按一次 → 重新开机再试 → 还不行请把 {folder} 里的 viewer.log 传给我们"
+msgstr "Couldn't reach the clone desktop (Windows code {code}). It's not a password problem. Try in order: reopen the tool and press again → restart the PC and try again → if it still fails, send us viewer.log from {folder}"
+
+msgid ""
+"这台电脑不能用桌面分身：\n"
+"• 分身要靠 Windows 的「远程桌面服务」，这台电脑没有这个服务\n"
+"• 常见于精简版 Windows，或用过系统优化／精简工具\n"
+"• 请改用一般模式"
+msgstr ""
+"This PC can't use the clone desktop:\n"
+"• The clone needs Windows' \"Remote Desktop Services\", and this PC doesn't have it\n"
+"• This is common on trimmed Windows builds or after system optimizer/cleanup tools\n"
+"• Please use normal mode instead"
+
+msgid ""
+"要先打开一个 Windows 服务：\n"
+"• 分身要靠「远程桌面服务」开第二个桌面，这台电脑把它停用了\n"
+"• 按「帮我打开」，Windows 确认请按「是」\n"
+"• 只是让服务能启动，别的电脑还是连不进来"
+msgstr ""
+"One Windows service must be turned on first:\n"
+"• The clone opens its second desktop through \"Remote Desktop Services\", which is disabled on this PC\n"
+"• Press \"Turn it on for me\" and click \"Yes\" when Windows asks\n"
+"• This only lets the service start; other PCs still can't connect"
+
+msgid "帮我打开"
+msgstr "Turn it on for me"
+
+msgid "「远程桌面服务」没有打开（Windows 的确认按了「否」或改不了）"
+msgstr "\"Remote Desktop Services\" was not turned on (\"No\" was pressed in the Windows prompt, or it couldn't be changed)"
+
+msgid "「远程桌面服务」已经打开，请再按一次「在桌面分身跑」"
+msgstr "\"Remote Desktop Services\" is on. Press \"Run on Clone Desktop\" again"
+
+msgid "活动战斗设定有更新"
+msgstr "Event Battle settings changed"
+
+msgid "「只刷普通难度」改成默认不勾，挑战战斗会推到你选的最高关卡。设定在「任务设定」里。"
+msgstr "\"Normal only\" is now off by default, so Challenge pushes up to the highest stage you pick. It's under \"Task Setup\"."
+
+msgid "活动战斗设定"
+msgstr "Event Battle settings"
+
+msgid "「只刷普通难度」已关掉，想只打普通战斗再打开。「挑战战斗最高关卡」可选第5、10、15关，推到后剩下的AP用快速战斗刷这一关。"
+msgstr "\"Normal only\" is now off; turn it on if you only want Normal. \"Challenge highest stage\" can be 5, 10 or 15; once reached, leftover AP quick-battles that stage."
+
+msgid "切换版本"
+msgstr "Switch version"
+
+msgid "包含测试版"
+msgstr "Include test versions"
+
+msgid "检查更新"
+msgstr "Check for updates"
+
+msgid "战斗倍数"
+msgstr "Multiplier"
+
+msgid "倍"
+msgstr "x"
+
+msgid "场"
+msgstr "battles"
+
+msgid "{used} / {free} 杯"
+msgstr "{used} / {free} cups"
+
+msgid "Windows 帐户的密码，不是 PIN"
+msgstr "Your Windows account password, not the PIN"
+
+msgid "Windows 确认按「是」"
+msgstr "Press \"Yes\" when Windows asks"
+
+msgid "「远程桌面服务」已经打开"
+msgstr "\"Remote Desktop Services\" is on"
+
+msgid "不见了，可能被防毒软件删掉"
+msgstr "Missing, maybe deleted by antivirus"
+
+msgid "专业版，可以用"
+msgstr "Pro edition, can use it"
+
+msgid "关掉工具，重新打开再按一次"
+msgstr "Close the tool, reopen it and press again"
+
+msgid "再按一次首页的「在桌面分身跑」"
+msgstr "Press \"Run on Clone Desktop\" on Home again"
+
+msgid "分身程序"
+msgstr "Clone program"
+
+msgid "到 Windows「设置 > 帐户 > 登录选项」加一组密码"
+msgstr "Add a password in Windows \"Settings > Accounts > Sign-in options\""
+
+msgid "只允许 Windows Hello 登录"
+msgstr "Only Windows Hello sign-in is allowed"
+
+msgid "可以用密码登录"
+msgstr "Password sign-in allowed"
+
+msgid "在左边「回报问题」送出"
+msgstr "Send it from \"Report a problem\" on the left"
+
+msgid "在防毒软件（例如 360、火绒）把分身文件夹设为信任"
+msgstr "Mark the clone folder as trusted in your antivirus (e.g. 360, Huorong)"
+
+msgid "家庭版不能用桌面分身，请用「一键完成日常」"
+msgstr "Home edition can't use the Clone Desktop; use \"Run All Dailies\""
+
+msgid "密码打上面「要打的密码」那组，不是 PIN"
+msgstr "Type the password shown under \"Password to type\" above, not the PIN"
+
+msgid "已经关掉"
+msgstr "Turned off"
+
+msgid "已设定"
+msgstr "Set up"
+
+msgid "帐户没有设密码"
+msgstr "The account has no password"
+
+msgid "平常只用 PIN 或人脸开机：按 Win+L，选钥匙图示，用密码登录电脑一次"
+msgstr "If you only sign in with PIN or face: press Win+L, pick the key icon and sign in once with the password"
+
+msgid "微软帐号的密码（登录微软网站用的那组），不是 PIN"
+msgstr "Your Microsoft account password (the one for Microsoft websites), not the PIN"
+
+msgid "微软帐户 {name}"
+msgstr "Microsoft account {name}"
+
+msgid "或把分身文件夹里的 viewer.log 传给我们"
+msgstr "Or send us viewer.log from the clone folder"
+
+msgid "打上面写的密码，勾「记住」"
+msgstr "Type the password shown above and tick \"Remember\""
+
+msgid "打开分身文件夹"
+msgstr "Open clone folder"
+
+msgid "按上面的「第一次设定」重新建立"
+msgstr "Press \"First-time setup\" above to set it up again"
+
+msgid "提示「分身程序不见了」"
+msgstr "Says the clone program is missing"
+
+msgid "提示「登录失败」"
+msgstr "Says sign-in failed"
+
+msgid "提示「连不上桌面分身」（代码 516 等）"
+msgstr "Says it can't connect (code 516 etc.)"
+
+msgid "本地帐户 {name}"
+msgstr "Local account {name}"
+
+msgid "桌面分身要 Windows 专业版，家庭版没有"
+msgstr "The clone desktop needs Windows Pro; Home doesn't have it"
+
+msgid "正常"
+msgstr "OK"
+
+msgid "没有关掉（Windows 的确认按了「否」或改不了）"
+msgstr "Not turned off (\"No\" was pressed, or it can't be changed)"
+
+msgid "没有密码的帐户进不了分身（Windows 的规定）"
+msgstr "An account without a password can't sign in to the clone (a Windows rule)"
+
+msgid "没有打开（Windows 的确认按了「否」或改不了）"
+msgstr "Not turned on (\"No\" was pressed, or it can't be changed)"
+
+msgid "没有输入密码，桌面分身没有打开"
+msgstr "No password typed, so the Clone Desktop didn't open"
+
+msgid "没能登录桌面分身，请看左边「桌面分身」页的「登录失败」"
+msgstr "Couldn't sign in to the Clone Desktop. See \"Sign-in failed\" on the \"Clone Desktop\" page on the left"
+
+msgid "用过系统优化／精简工具或 RDP Wrapper 的电脑，可能不能用"
+msgstr "PCs that used system optimiser/trimming tools or RDP Wrapper may not work"
+
+msgid "登录帐户"
+msgstr "Sign-in account"
+
+msgid "第一次怎么用"
+msgstr "First time"
+
+msgid "被停用了"
+msgstr "Disabled"
+
+msgid "要 Windows 专业版；怎么设定看左边「桌面分身」页"
+msgstr "Needs Windows Pro; see the \"Clone Desktop\" page on the left for setup"
+
+msgid "要打的密码"
+msgstr "Password to type"
+
+msgid "认不出是哪种帐户"
+msgstr "Can't tell the account type"
+
+msgid "设定好后，回来这页看一次"
+msgstr "After setup, come back to this page"
+
+msgid "请用「一键完成日常」"
+msgstr "Use \"Run All Dailies\""
+
+msgid "边跑边用电脑；进不去就照这页做"
+msgstr "Use your PC while it runs; can't get in? Follow this page"
+
+msgid "还是不行"
+msgstr "Still not working"
+
+msgid "还没设定"
+msgstr "Not set up yet"
+
+msgid "这台电脑没有（精简版 Windows），不能用"
+msgstr "This PC doesn't have it (trimmed Windows), can't use"
+
+msgid "这台电脑的开机密码，不是 PIN"
+msgstr "This PC's sign-in password, not the PIN"
+
+msgid "这台电脑（自动检查）"
+msgstr "This PC (checked automatically)"
+
+msgid "远程桌面服务"
+msgstr "Remote Desktop Services"
+
+msgid "遇到问题（点开看做法）"
+msgstr "Problems (click for steps)"
+
+msgid "重新开机后再试（刚设定完常要重新开机）"
+msgstr "Restart the PC and try again (often needed right after setup)"
+
+msgid "首页按「在桌面分身跑」"
+msgstr "Press \"Run on Clone Desktop\" on Home"
+
+msgid "首页没有「在桌面分身跑」"
+msgstr "No \"Run on Clone Desktop\" on Home"
+
+msgid "进不去？看教学"
+msgstr "Can't get in? See guide"

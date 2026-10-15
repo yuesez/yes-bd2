@@ -14,6 +14,7 @@ from src.tasks.recovery import recover_to_home
 from src.tasks.task_vision_mixin import REFERENCE_HEIGHT, REFERENCE_WIDTH, TaskVisionMixin
 from src.utils.home_confirmation import HOME_DIMMED_P95_THRESHOLD_DEFAULT
 from src.utils.ocr_utils import normalize_ocr_text
+from src.utils.wait_limits import LOADING_MAX_SECONDS, is_loading_dark, load_wait
 
 GUILD_TEMPLATE = TemplateSpec(
     name="guild",
@@ -133,6 +134,11 @@ GUILD_ENTRY_LOOKS = 5
 GUILD_ENTRY_LOOK_SECONDS = 0.5
 # A swallowed entry click leaves home up: only then is it pressed again.
 GUILD_ENTRY_RETRY_SECONDS = 4.0
+# Leo 2026-10-15: a 1080p run pressed the entry twice and home never changed
+# (the player's second run went in; a lag, likely).  「先做補按加長 然後 多給一次
+# 機會」: re-presses are held longer and there is one more of them.
+GUILD_ENTRY_RETRIES = 2
+GUILD_ENTRY_LONG_PRESS_SECONDS = 0.15
 # A sub-step that clicked nothing on a confirmed home (no guild entry) is
 # skipped, not failed.
 STEP_SKIPPED = "skipped"
@@ -244,9 +250,9 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
                 '主页压暗阈值': HOME_DIMMED_P95_THRESHOLD_DEFAULT,
                 '日常 OCR 阈值': 0.2,
                 'loading 出现等待秒数': 6.0,
-                'loading 消失等待秒数': 35.0,
+                'loading 消失等待秒数': LOADING_MAX_SECONDS,
                 '公会签到成功等待秒数': 8.0,
-                '小屋页面等待秒数': 12.0,
+                '小屋页面等待秒数': LOADING_MAX_SECONDS,
                 '一键收菜菜单等待秒数': 8.0,
                 '主页确认等待秒数': 10.0,
             }
@@ -384,25 +390,45 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             seen[:] = self._wait_guild_page(0.0)
             return seen[0]
 
+        presses = []
+
+        def press_entry():
+            if presses:  # a re-press, held longer: a short click can be lost
+                x, y = GUILD_SIGN_IN_ENTRY_REFERENCE_POINT
+                self.operate_click(  # 不用确认：press_and_confirm 看公会页面
+                    x / REFERENCE_WIDTH,
+                    y / REFERENCE_HEIGHT,
+                    down_time=GUILD_ENTRY_LONG_PRESS_SECONDS,
+                    after_sleep=0.5,
+                )
+            else:
+                self._click_reference(*GUILD_SIGN_IN_ENTRY_REFERENCE_POINT, after_sleep=0.5)  # 不用确认：同上
+            presses.append(1)
+
         # A click the game swallowed leaves home up: only then press again.
         entered = self.press_and_confirm(
             "公会签到：公会入口",
-            lambda: self._click_reference(*GUILD_SIGN_IN_ENTRY_REFERENCE_POINT, after_sleep=0.5),
+            press_entry,
             on_guild_page,
             still_before=self._home_still_showing,
             timeout=GUILD_ENTRY_RETRY_SECONDS,
+            retries=GUILD_ENTRY_RETRIES,
         )
         # Entering the guild page is the sign-in (user, 2026-09-27); the
         # 签到成功 toast only shows on the day's first visit, so waiting for it
         # cost ~15 s on every later run.  The page's fixed UI is the proof.
         state, text = seen if entered else self._wait_guild_page(
             float(self.config.get("loading 出现等待秒数", 6.0))
-            + float(self.config.get("公会签到成功等待秒数", 8.0))
+            + float(self.config.get("公会签到成功等待秒数", 8.0)),
+            load=True,
         )
         self.info_set("公会签到 OCR", text or "-")
         self._status_set("公会签到成功", "是" if state else "否")
         if state is None:
-            self.log_info("公会签到：点了公会入口但没看到公会页面（可能未加入公会），未签到。")
+            self.log_info(
+                f"公会签到：公会入口按了{len(presses)}次都没看到公会页面"
+                "（游戏没反应或可能未加入公会），未签到。"
+            )
             return False
         if state == "toast":
             self.log_info("公会签到：检测到签到成功提示。")
@@ -414,17 +440,24 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             self.log_info("公会签到：已进入公会页面（今日签到提示已出现过或未弹出）。")
         return self._return_home_from_guild()
 
-    def _wait_guild_page(self, timeout: float) -> tuple[str | None, str]:
-        """"toast" (签到成功 shown), "page" (guild page UI) or None."""
+    def _wait_guild_page(self, timeout: float, load: bool = False) -> tuple[str | None, str]:
+        """"toast" (签到成功 shown), "page" (guild page UI) or None.
+
+        ``load``: the page comes after the guild loading screen (load_wait)."""
         end_at = monotonic() + timeout
+        wait = load_wait(monotonic(), timeout) if load else None
         text = ""
         while True:
-            text = self._ocr_text(self.capture_frame(), name="公会页面")
+            frame = self.capture_frame()
+            text = self._ocr_text(frame, name="公会页面")
             if self._keyword_match_count(text, GUILD_SUCCESS_KEYWORDS) >= 1:
                 return "toast", text
             if self._keyword_match_count(text, GUILD_PAGE_KEYWORDS) >= 2:
                 return "page", text
-            if monotonic() >= end_at:
+            if wait is not None:
+                if wait.over(frame, monotonic(), loading=is_loading_dark(frame)):
+                    return None, text
+            elif monotonic() >= end_at:
                 return None, text
             self.sleep(0.5)
 
@@ -453,9 +486,11 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         self._status_set("公会签到返回主页结果", "通过" if home_ok else "失败")
         return home_ok
 
-    def _wait_my_home_page(self, timeout: float) -> bool:
+    def _wait_my_home_page(self, timeout: float, load: bool = False) -> bool:
+        """``load``: the page comes after the my-home loading (load_wait)."""
         vision = self._quick_vision()
         end_at = monotonic() + timeout
+        wait = load_wait(monotonic(), timeout) if load else None
         while True:
             frame = self.capture_frame()
             result = self._match(frame, MY_HOME_TEMPLATE)
@@ -471,7 +506,10 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             )
             if self._keyword_match_count(title, ["我的小屋"]) >= 1:
                 return True
-            if monotonic() >= end_at:
+            if wait is not None:
+                if wait.over(frame, monotonic(), loading=is_loading_dark(frame)):
+                    return False
+            elif monotonic() >= end_at:
                 return False
             self.sleep(MY_HOME_TITLE_OCR_RETRY_INTERVAL)
 
@@ -493,10 +531,11 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             if attempt < MY_HOME_ENTRY_CLICK_ATTEMPTS:
                 self.log_info("小屋签到：入口点击后仍在主页，重试点击。")
         if not found:
+            # Leo 2026-10-14 「頂多等8秒到10秒」: was loading 6 + page 12 +
+            # loading 35 s.  Leo 2026-10-15 「你單純等載入怎麼可以改成只等10秒」:
+            # a load wait again, given up early only on a still screen.
             found = self._wait_my_home_page(
-                float(self.config.get("loading 出现等待秒数", 6.0))
-                + float(self.config.get("小屋页面等待秒数", 12.0))
-                + float(self.config.get("loading 消失等待秒数", 35.0))
+                float(self.config.get("小屋页面等待秒数", LOADING_MAX_SECONDS)), load=True
             )
         self._status_set("小屋页面检测", "是" if found else "否")
         if found:

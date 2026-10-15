@@ -163,6 +163,8 @@ class RestaurantStoneTask(_ClaimTaskBase):
                 return True
             # A swallowed click leaves the popup open: press 立刻前往 again.
             if keyword_match_count(self._popup_text(), BUSINESS_POPUP_KEYWORDS) < 2:
-                return self._wait_for_title("餐厅", RESTAURANT_TITLE, timeout=20.0)
+                # The popup closed: the restaurant is loading, a load wait
+                # (Leo 2026-10-15 「你單純等載入怎麼可以改成只等10秒」).
+                return self._wait_for_title("餐厅", RESTAURANT_TITLE)
             self.log_info(f"领取常客圣石：第{attempt}次点击立刻前往未生效，重试。")
         return False

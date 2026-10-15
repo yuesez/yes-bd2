@@ -3,9 +3,10 @@ from time import monotonic
 from qfluentwidgets import FluentIcon
 
 from src.tasks.BaseBD2Task import BaseBD2Task
-from src.tasks.task_vision_mixin import LOADING_TEMPLATE, TaskVisionMixin
+from src.tasks.task_vision_mixin import LOADING_TEMPLATE, TaskVisionMixin, loading_gone_seconds
 from src.utils.ocr_utils import keyword_match_count
 from src.utils.press_confirm import SLOW_PC_GRACE_SECONDS
+from src.utils.wait_limits import LOADING_MAX_SECONDS, STUCK_SECONDS, StillTimer, is_loading_dark, load_wait
 
 KEYWORD_MATCH_RATIO = 0.9
 
@@ -34,7 +35,8 @@ CONFIRM_GONE_RECHECK_SECONDS = 0.5
 LEGACY_RESULT_SKIP_BURST_SECONDS = 3.0
 # On a slow PC the result animation outlasted burst + OCR wait and the run
 # failed after the free pull was spent: past the OCR wait, skip is pressed
-# again with a ticket-popup check before every press, up to this long.
+# again with a ticket-popup check before every press, up to this long while
+# the animation keeps moving; a screen still for STUCK_SECONDS ends it sooner.
 RESULT_TOTAL_SECONDS = 30.0
 # The skip corner is only pressed on an unknown (animation) screen: never on
 # the gacha page (currency bar), the confirm dialog, or anything that sells.
@@ -64,8 +66,8 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
                 "主页压暗阈值": 185.0,
                 "抽卡 OCR 阈值": 0.2,
                 "loading 出现等待秒数": 6.0,
-                "loading 消失等待秒数": 35.0,
-                "抽卡页面等待秒数": 12.0,
+                "loading 消失等待秒数": LOADING_MAX_SECONDS,
+                "抽卡页面等待秒数": LOADING_MAX_SECONDS,
                 "免费抽按钮等待秒数": 3.0,
                 "确认弹窗等待秒数": 8.0,
                 "确认弹窗重试次数": 2,
@@ -277,7 +279,7 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
         last_text: str = "",
         interval: float = 0.5,
     ) -> tuple[str, bool, str]:
-        end_at = monotonic() + float(self.config.get("loading 消失等待秒数", 35.0))
+        end_at = monotonic() + loading_gone_seconds(self.config)  # Leo 2026-10-15
         while monotonic() <= end_at:
             frame = self.capture_frame()
             found, text = self._ocr_keywords_in_frame(
@@ -325,7 +327,7 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
         name: str,
         interval: float = 0.35,
     ) -> bool:
-        end_at = monotonic() + float(self.config.get("loading 消失等待秒数", 35.0))
+        end_at = monotonic() + loading_gone_seconds(self.config)  # Leo 2026-10-15
         while monotonic() <= end_at:
             frame = self.capture_frame()
             if self._home_confirmation_ok(frame, name):
@@ -340,12 +342,22 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
         self.log_info(f"{name}：UI_loading_black.png 未在限定时间内消失。")
         return False
 
+    def _gacha_page_seconds(self) -> float:
+        # A page after the gacha loading: a load wait, at least
+        # LOADING_MAX_SECONDS while the screen loads or moves (Leo 2026-10-15
+        # 「你單純等載入怎麼可以改成只等10秒」); see load_wait.
+        try:
+            return float(self.config.get("抽卡页面等待秒数", LOADING_MAX_SECONDS))
+        except (TypeError, ValueError):
+            return LOADING_MAX_SECONDS
+
     def _wait_for_gacha_page(self, name: str) -> bool:
         found, text = self._wait_for_ocr_keywords(
             GACHA_PAGE_KEYWORDS,
-            timeout=float(self.config.get("抽卡页面等待秒数", 12.0)),
+            timeout=self._gacha_page_seconds(),
             minimum_matches=int(self.config.get("抽卡页面关键词最低命中数", 3)),
             name=f"{name}_gacha_page",
+            loading_extends=True,
         )
         self.info_set(f"{name} OCR", text or "-")
         if found:
@@ -500,9 +512,10 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
     def _wait_for_equipment_pool_page(self, name: str) -> bool:
         found, text = self._wait_for_ocr_keywords(
             EQUIPMENT_POOL_KEYWORDS,
-            timeout=float(self.config.get("抽卡页面等待秒数", 12.0)),
+            timeout=self._gacha_page_seconds(),
             minimum_matches=1,
             name=f"{name}_equipment_pool",
+            loading_extends=True,
         )
         self.info_set(f"{name} OCR", text or "-")
         if found:
@@ -514,9 +527,10 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
     def _wait_for_clothing_pool_page(self, name: str) -> bool:
         found, text = self._wait_for_ocr_keywords(
             CLOTHING_POOL_KEYWORDS,
-            timeout=float(self.config.get("抽卡页面等待秒数", 12.0)),
+            timeout=self._gacha_page_seconds(),
             minimum_matches=1,
             name=f"{name}_clothing_pool",
+            loading_extends=True,
         )
         self.info_set(f"{name} OCR", text or "-")
         if found:
@@ -584,14 +598,23 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
         deadline = max(watch_until, started + RESULT_TOTAL_SECONDS)
         pressing = True
         text = ""
+        # Skip keeps being pressed, so only a screen that stopped moving tells
+        # a stuck result from a long animation (Leo 2026-10-14 「頂多等8秒到10秒」).
+        still = StillTimer()
         while True:
+            frame = self.capture_frame()
             found, text = self._ocr_keywords_in_frame(
-                self.capture_frame(), BACK_PAGE_KEYWORDS, minimum_matches, f"{section_name}_result"
+                frame, BACK_PAGE_KEYWORDS, minimum_matches, f"{section_name}_result"
             )
             if found:
                 return True, text
             now = monotonic()
             if now > deadline:
+                return False, text
+            if still.still_for(frame, now) >= STUCK_SECONDS:
+                self.log_info(
+                    f"{section_name}：结果画面 {STUCK_SECONDS:.0f} 秒没有变化，也没认出结果页。"
+                )
                 return False, text
             if now <= watch_until:
                 self.sleep(ocr_interval)
@@ -619,10 +642,14 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
         minimum_matches: int,
         name: str,
         interval: float = 0.5,
+        loading_extends: bool = False,
     ) -> tuple[bool, str]:
+        """``loading_extends``: the page comes after the gacha loading (Leo
+        2026-10-15 「你單純等載入怎麼可以改成只等10秒」): see load_wait."""
         end_at = monotonic() + max(0.0, timeout)
+        wait = load_wait(monotonic(), timeout) if loading_extends else None
         last_text = ""
-        while monotonic() <= end_at:
+        while True:
             frame = self.capture_frame()
             found, text = self._ocr_keywords_in_frame(
                 frame,
@@ -633,8 +660,12 @@ class FreeGachaTask(TaskVisionMixin, BaseBD2Task):
             last_text = text
             if found:
                 return True, text
+            if wait is not None:
+                if wait.over(frame, monotonic(), loading=is_loading_dark(frame)):
+                    return False, last_text
+            elif monotonic() > end_at:
+                return False, last_text
             self.sleep(interval)
-        return False, last_text
 
     def _ocr_keywords_in_frame(
         self,

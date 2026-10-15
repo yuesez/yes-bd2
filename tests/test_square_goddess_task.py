@@ -1,3 +1,4 @@
+import itertools
 import unittest
 
 from src.utils.cartridge_quick_switch import QUICK_SWITCH_STABLE_FRAMES
@@ -499,7 +500,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
         self.assertEqual(
             [
                 {
-                    "timeout": 15.0,
+                    "timeout": 15.0,  # Leo 2026-10-15: a load wait keeps its setting
                     "retry_home_clicks": 2,
                     "retry_interval": 2.0,
                     "total_home_clicks": 3,
@@ -747,7 +748,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task._ocr_pattern_click_point = lambda *args, **kwargs: (None, "")
         task._click_client = lambda *args, **kwargs: self.fail("No prayer prompt")
         task.operate_click = lambda *args, **kwargs: self.fail("No fixed click")
-        with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=[0, 0, 2]):
+        with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=itertools.count(0, 2)):
             self.assertFalse(task._wait_for_goddess_prayer_completion(timeout=1))
 
 
@@ -801,15 +802,30 @@ class StuckGoddessWalkTest(unittest.TestCase):
             return task._wait_for_goddess_prayer_completion(timeout=timeout)
 
     def test_a_stuck_walk_is_stopped_and_the_navigation_pressed_again(self):
-        # 25 looks of the banner (12 s), then the ✕ works and the prompt shows.
-        screens = iter([self.BANNER] * 45 + ["", "", "", "向女神像许愿"])
+        # The banner over a field that does not move for 10 s (Leo 2026-10-14:
+        # was 20 s of banner), then the ✕ works and the prompt shows.
+        screens = iter([self.BANNER] * 25 + ["", "", "", "向女神像许愿"])
         task, clock, clicks, navigations, logs = self._task(screens)
         task._wait_for_daily_navigation_to_disappear = lambda **kwargs: True
         self.assertTrue(self._run(task, clock))
         self.assertIn(self.CANCEL, clicks)
         self.assertEqual([8.0], navigations)
         self.assertEqual((1410, 880), clicks[-1])
-        self.assertTrue(any("停在半路超过20秒" in line for line in logs))
+        self.assertTrue(any("画面超过10秒没动" in line for line in logs))
+
+    def test_a_long_walk_that_keeps_moving_is_not_stopped(self):
+        # 30 s of banner over a field that pans: the game is walking.
+        screens = iter([self.BANNER] * 120 + ["向女神像许愿"])
+        task, clock, clicks, navigations, logs = self._task(screens)
+        looks = itertools.count()
+        task.capture_frame = lambda: np.full(
+            (1080, 1920, 3), 60 * (next(looks) % 2), dtype=np.uint8
+        )
+        task._wait_for_daily_navigation_to_disappear = lambda **kwargs: True
+        self.assertTrue(self._run(task, clock))
+        self.assertNotIn(self.CANCEL, clicks)
+        self.assertEqual([], navigations)
+        self.assertGreater(clock[0], 20.0)
 
     def test_a_walk_stuck_every_time_ends_with_the_walk_stopped(self):
         # The banner goes when ✕ is pressed and comes back with each navigation.
@@ -881,3 +897,58 @@ class StuckGoddessWalkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SquareArrivalWaitTest(unittest.TestCase):
+    """Leo 2026-10-15 「我說的10秒是卡死 或者辨識不到」: loading is not stuck."""
+
+    def _run(self, screen_at, prompt_at=None):
+        from src.utils.wait_limits import STUCK_SECONDS  # noqa: F401
+
+        task = object.__new__(SquareGoddessTask)
+        task.config = {}
+        task.info_set = lambda *_args, **_kwargs: None
+        logs = []
+        task.log_info = lambda message, **_kwargs: logs.append(message)
+        clock = [0.0]
+        task.sleep = lambda seconds: clock.__setitem__(0, clock[0] + 1.0)
+        task.capture_frame = lambda: screen_at(clock[0])
+        task._match = lambda frame, spec: MatchResult(-1.0, (0, 0), (0, 0))
+        task._passes = lambda result, spec: False
+        task._ocr_pattern_click_point = lambda frame, patterns, name, roi=None: (
+            ((900, 500), "向女神像许愿")
+            if prompt_at is not None and clock[0] >= prompt_at
+            else (None, "")
+        )
+        with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=lambda: clock[0]):
+            arrived = SquareGoddessTask._wait_for_template(
+                task, FANTASIA_SQUARE_TEMPLATE, timeout=10.0, name="梦幻广场", arrival=True
+            )
+        return arrived, clock[0], logs
+
+    BLACK = np.full((90, 160, 3), 8, np.uint8)
+    SQUARE = np.full((90, 160, 3), 140, np.uint8)
+    HOME = np.full((90, 160, 3), 200, np.uint8)
+
+    def test_wish_prompt_after_a_long_load_counts_as_arrived(self):
+        # 2K 10-15: square up 11 s after the click, its picture unmatched.
+        arrived, now, logs = self._run(
+            lambda t: self.BLACK if t < 11.0 else self.SQUARE, prompt_at=11.0
+        )
+        self.assertTrue(arrived)
+        self.assertEqual(11.0, now)
+        self.assertTrue(any("向女神像许愿" in line for line in logs))
+
+    def test_a_still_screen_that_is_not_the_square_ends_after_stuck_seconds(self):
+        from src.utils.wait_limits import STUCK_SECONDS
+
+        arrived, now, _logs = self._run(lambda t: self.HOME)
+        self.assertFalse(arrived)
+        self.assertTrue(STUCK_SECONDS <= now <= STUCK_SECONDS + 1.0, now)
+
+    def test_an_endless_loading_screen_stops_at_the_cap(self):
+        from src.utils.wait_limits import LOADING_MAX_SECONDS
+
+        arrived, now, _logs = self._run(lambda t: self.BLACK)
+        self.assertFalse(arrived)
+        self.assertTrue(LOADING_MAX_SECONDS <= now <= LOADING_MAX_SECONDS + 1.0, now)

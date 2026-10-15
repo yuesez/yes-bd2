@@ -49,10 +49,10 @@
   "ja": "ギルド、マイハウス、酒場",
   "ko": "길드, 마이홈, 주점"
  },
- "一键日常里紧接免费抽抽乐时，先只处理带黄色!的新装备，不动背包筛选和排序；没有拆到时，背包先筛选出 R、再筛选出 SR（按获得时间排序），看最前面几件：强化到 +7 并自动分解；SR 会点开核对，只拆 3★/4★ 角色专用的（5★ 角色的可在设定里选）；上锁、穿戴中、已强化的一律保留，UR 不碰。背包筛选和排序会改回原样。没有可分解的爛装时，做一件 N 装备强化后分解（每日任务）。": {
-  "en": "Right after the free Gacha in Daily One-Click, it first handles only the new Gear with the yellow !, leaving the bag filter and sort as they are. If none is dismantled, it filters the bag to R, then SR (sorted by time acquired), and checks the Gear at the front: it is upgraded to +7 and dismantled automatically. SR is opened and checked first, and only 3★/4★ Characters' Exclusive Gear is dismantled (5★ Characters' can be chosen in the settings); locked, equipped or already upgraded Gear is always kept, and UR is never touched. The bag filter and sort are put back afterwards. With nothing to dismantle, one N Gear is crafted, upgraded and dismantled (daily mission).",
-  "ja": "デイリー一括で無料ガチャの直後は、まず黄色い ! の付いた新しい装備だけを処理し、バッグの絞り込みと並び順はそのまま。分解できなかったときは、バッグを R、次に SR で絞り込み（獲得順）、先頭の装備を処理：+7 まで強化して自動分解。SR は開いて確認し、3★/4★ キャラクターの専用装備だけ分解する（5★ キャラクターの分は設定で選べる）。ロック中・装備中・強化済みの装備はすべて残し、UR には触れない。バッグの絞り込みと並び順は元に戻す。分解できる装備がないときは N 装備を1つ製作し、強化して分解（デイリーミッション）。",
-  "ko": "일일 원클릭에서 무료 뽑기 바로 다음에는 먼저 노란 ! 표시가 있는 새 장비만 처리하고, 가방 필터와 정렬은 그대로 둠. 분해하지 못했으면 가방을 R, 이어서 SR로 필터(획득 순)하고 맨 앞 장비를 처리: +7까지 강화해 자동 분해. SR은 열어서 확인하고 3★/4★ 캐릭터 전용 장비만 분해(5★ 캐릭터 것은 설정에서 선택). 잠금·착용 중·강화된 장비는 모두 보관하고, UR은 건드리지 않음. 가방 필터와 정렬은 원래대로 되돌림. 분해할 장비가 없으면 N 장비 1개를 제작해 강화 후 분해(일일 임무)."
+ "一键日常里紧接免费抽抽乐时，先只处理带黄色!的新装备，不动背包筛选和排序；没有拆到时，背包先筛选出 R、再筛选出 SR（按获得时间排序），看最前面几件：强化到 +7 并自动分解；SR 会点开核对，只拆 3★/4★ 角色专用的；设定里开启 5★ 后，SR 不点开直接拆；上锁、穿戴中、已强化的一律保留，UR 不碰。背包筛选和排序会改回原样。没有可分解的爛装时，做一件 N 装备强化后分解（每日任务）。": {
+  "en": "Right after the free Gacha in Daily One-Click, it first handles only the new Gear with the yellow !, leaving the bag filter and sort as they are. If none is dismantled, it filters the bag to R, then SR (sorted by time acquired), and checks the Gear at the front: it is upgraded to +7 and dismantled automatically. SR is opened and checked first, and only 3★/4★ Characters' Exclusive Gear is dismantled ; with 5★ turned on in the settings, SR is dismantled without opening it; locked, equipped or already upgraded Gear is always kept, and UR is never touched. The bag filter and sort are put back afterwards. With nothing to dismantle, one N Gear is crafted, upgraded and dismantled (daily mission).",
+  "ja": "デイリー一括で無料ガチャの直後は、まず黄色い ! の付いた新しい装備だけを処理し、バッグの絞り込みと並び順はそのまま。分解できなかったときは、バッグを R、次に SR で絞り込み（獲得順）、先頭の装備を処理：+7 まで強化して自動分解。SR は開いて確認し、3★/4★ キャラクターの専用装備だけ分解する。設定で 5★ をオンにすると、SR は開かずにそのまま分解する。ロック中・装備中・強化済みの装備はすべて残し、UR には触れない。バッグの絞り込みと並び順は元に戻す。分解できる装備がないときは N 装備を1つ製作し、強化して分解（デイリーミッション）。",
+  "ko": "일일 원클릭에서 무료 뽑기 바로 다음에는 먼저 노란 ! 표시가 있는 새 장비만 처리하고, 가방 필터와 정렬은 그대로 둠. 분해하지 못했으면 가방을 R, 이어서 SR로 필터(획득 순)하고 맨 앞 장비를 처리: +7까지 강화해 자동 분해. SR은 열어서 확인하고 3★/4★ 캐릭터 전용 장비만 분해. 설정에서 5★를 켜면 SR은 열지 않고 바로 분해. 잠금·착용 중·강화된 장비는 모두 보관하고, UR은 건드리지 않음. 가방 필터와 정렬은 원래대로 되돌림. 분해할 장비가 없으면 N 장비 1개를 제작해 강화 후 분해(일일 임무)."
  },
  "执行公会签到、小屋签到和酒馆一键收菜。": {
   "en": "Does the Guild Check-in, House Check-in and Tavern Collect All.",
@@ -1173,5 +1173,360 @@
   "en": "How long to wait after a button is recognized before pressing it (seconds).",
   "ja": "ボタンを認識してから押すまでの待ち時間（秒）。",
   "ko": "버튼을 인식한 뒤 누르기 전까지 기다리는 시간(초)."
+ },
+ "只刷普通难度": {
+  "en": "Normal only",
+  "ja": "ノーマルのみ周回",
+  "ko": "일반만 반복"
+ },
+ "挑战战斗最高关卡": {
+  "en": "Highest Challenge stage",
+  "ja": "チャレンジ戦闘の最高ステージ",
+  "ko": "도전 전투 최고 스테이지"
+ },
+ "完全不打挑战战斗；普通战斗通关后，剩下的AP用快速战斗刷普通战斗15。": {
+  "en": "Skips Challenge Battle entirely; once Normal Battle is cleared, the AP left goes to Quick Battle on Normal Battle 15.",
+  "ja": "チャレンジ戦闘は一切行いません。ノーマル戦闘クリア後、残りのAPはノーマル戦闘15の高速戦闘に使います。",
+  "ko": "도전 전투는 전혀 하지 않습니다. 일반 전투를 클리어한 뒤 남은 AP는 일반 전투 15 빠른 전투에 씁니다."
+ },
+ "挑战战斗只推到这一关（快速战斗只有第5、10、15关）；到了之后剩下的AP用快速战斗刷这一关。": {
+  "en": "Challenge Battle is only pushed up to this stage (Quick Battle exists only on stages 5, 10 and 15); after that, the AP left goes to Quick Battle on this stage.",
+  "ja": "チャレンジ戦闘はこのステージまで進めます（高速戦闘はステージ5・10・15のみ）。到達後、残りのAPはこのステージの高速戦闘に使います。",
+  "ko": "도전 전투는 이 스테이지까지만 진행합니다(빠른 전투는 5, 10, 15 스테이지만). 도달한 뒤 남은 AP는 이 스테이지 빠른 전투에 씁니다."
+ },
+ "推不动时（都通关或到了设定的关卡），剩下的AP用快速战斗刷那一关；打输了就直接回主页。": {
+  "en": "When it can't push further (all cleared or the set stage reached), the AP left goes to Quick Battle on that stage; after a lost battle it goes straight back to the home screen.",
+  "ja": "これ以上進めない時（全クリア、設定ステージ到達）、残りのAPはそのステージの高速戦闘に使います。敗北した時はすぐホームに戻ります。",
+  "ko": "더 진행할 수 없을 때(모두 클리어, 설정 스테이지 도달) 남은 AP는 그 스테이지 빠른 전투에 씁니다. 패배하면 바로 홈으로 돌아갑니다."
+ },
+ "连不上桌面分身（Windows 代码 {code}），不是密码的问题。请依序试：重开工具再按一次 → 重新开机再试 → 还不行请把 {folder} 里的 viewer.log 传给我们": {
+  "en": "Couldn't reach the clone desktop (Windows code {code}). It's not a password problem. Try in order: reopen the tool and press again → restart the PC and try again → if it still fails, send us viewer.log from {folder}",
+  "ja": "分身デスクトップに接続できません（Windows コード {code}）。パスワードの問題ではありません。順に試してください：ツールを開き直してもう一度押す → PC を再起動して試す → それでもだめなら {folder} の viewer.log を送ってください",
+  "ko": "분신 데스크톱에 연결할 수 없습니다(Windows 코드 {code}). 비밀번호 문제가 아닙니다. 순서대로 해 보세요: 도구를 다시 열고 다시 누르기 → PC 재시작 후 다시 시도 → 그래도 안 되면 {folder}의 viewer.log를 보내 주세요"
+ },
+ "这台电脑不能用桌面分身：\n• 分身要靠 Windows 的「远程桌面服务」，这台电脑没有这个服务\n• 常见于精简版 Windows，或用过系统优化／精简工具\n• 请改用一般模式": {
+  "en": "This PC can't use the clone desktop:\n• The clone needs Windows' \"Remote Desktop Services\", and this PC doesn't have it\n• This is common on trimmed Windows builds or after system optimizer/cleanup tools\n• Please use normal mode instead",
+  "ja": "この PC では分身デスクトップを使えません：\n• 分身には Windows の「リモート デスクトップ サービス」が必要ですが、この PC にはありません\n• 軽量化された Windows や、最適化・軽量化ツールを使った PC でよくあります\n• 通常モードを使ってください",
+  "ko": "이 PC에서는 분신 데스크톱을 쓸 수 없습니다:\n• 분신은 Windows의 '원격 데스크톱 서비스'가 필요한데, 이 PC에는 없습니다\n• 경량화된 Windows나 최적화·경량화 도구를 쓴 PC에서 흔합니다\n• 일반 모드를 사용하세요"
+ },
+ "要先打开一个 Windows 服务：\n• 分身要靠「远程桌面服务」开第二个桌面，这台电脑把它停用了\n• 按「帮我打开」，Windows 确认请按「是」\n• 只是让服务能启动，别的电脑还是连不进来": {
+  "en": "One Windows service must be turned on first:\n• The clone opens its second desktop through \"Remote Desktop Services\", which is disabled on this PC\n• Press \"Turn it on for me\" and click \"Yes\" when Windows asks\n• This only lets the service start; other PCs still can't connect",
+  "ja": "先に Windows のサービスを 1 つ有効にする必要があります：\n• 分身は「リモート デスクトップ サービス」で 2 つ目のデスクトップを開きますが、この PC では無効になっています\n• 「オンにする」を押し、Windows の確認では「はい」を押す\n• サービスを起動できるようにするだけで、他の PC からは接続できません",
+  "ko": "먼저 Windows 서비스 하나를 켜야 합니다:\n• 분신은 '원격 데스크톱 서비스'로 두 번째 데스크톱을 여는데, 이 PC에서는 사용 안 함으로 되어 있습니다\n• '대신 켜기'를 누르고, Windows 확인 창에서 '예'를 누르세요\n• 서비스를 시작할 수 있게만 하며, 다른 PC는 여전히 접속할 수 없습니다"
+ },
+ "帮我打开": {
+  "en": "Turn it on for me",
+  "ja": "オンにする",
+  "ko": "대신 켜기"
+ },
+ "「远程桌面服务」没有打开（Windows 的确认按了「否」或改不了）": {
+  "en": "\"Remote Desktop Services\" was not turned on (\"No\" was pressed in the Windows prompt, or it couldn't be changed)",
+  "ja": "「リモート デスクトップ サービス」を有効にできませんでした（Windows の確認で「いいえ」を押したか、変更できませんでした）",
+  "ko": "'원격 데스크톱 서비스'를 켜지 못했습니다(Windows 확인 창에서 '아니요'를 눌렀거나 바꿀 수 없음)"
+ },
+ "「远程桌面服务」已经打开，请再按一次「在桌面分身跑」": {
+  "en": "\"Remote Desktop Services\" is on. Press \"Run on Clone Desktop\" again",
+  "ja": "「リモート デスクトップ サービス」を有効にしました。もう一度「分身デスクトップで実行」を押してください",
+  "ko": "'원격 데스크톱 서비스'를 켰습니다. '분신 데스크톱에서 실행'을 다시 누르세요"
+ },
+ "切换版本": {
+  "en": "Switch version",
+  "ja": "バージョン切り替え",
+  "ko": "버전 전환"
+ },
+ "包含测试版": {
+  "en": "Include test versions",
+  "ja": "テスト版を含める",
+  "ko": "테스트 버전 포함"
+ },
+ "检查更新": {
+  "en": "Check for updates",
+  "ja": "アップデートを確認",
+  "ko": "업데이트 확인"
+ },
+ "Windows 帐户的密码，不是 PIN": {
+  "en": "Your Windows account password, not the PIN",
+  "ja": "Windows アカウントのパスワード（PIN ではありません）",
+  "ko": "Windows 계정 비밀번호 (PIN 아님)"
+ },
+ "Windows 确认按「是」": {
+  "en": "Press \"Yes\" when Windows asks",
+  "ja": "Windows の確認で「はい」を押す",
+  "ko": "Windows 확인 창에서 「예」를 누르세요"
+ },
+ "「远程桌面服务」已经打开": {
+  "en": "\"Remote Desktop Services\" is on",
+  "ja": "「リモート デスクトップ サービス」をオンにしました",
+  "ko": "「원격 데스크톱 서비스」를 켰습니다"
+ },
+ "不见了，可能被防毒软件删掉": {
+  "en": "Missing, maybe deleted by antivirus",
+  "ja": "見つかりません。ウイルス対策ソフトに削除された可能性があります",
+  "ko": "없습니다. 백신 프로그램이 지웠을 수 있습니다"
+ },
+ "专业版，可以用": {
+  "en": "Pro edition, can use it",
+  "ja": "Pro エディション、使えます",
+  "ko": "Pro 버전, 사용 가능"
+ },
+ "关掉工具，重新打开再按一次": {
+  "en": "Close the tool, reopen it and press again",
+  "ja": "ツールを閉じて開き直し、もう一度押す",
+  "ko": "도구를 닫고 다시 열어 한 번 더 누르세요"
+ },
+ "再按一次首页的「在桌面分身跑」": {
+  "en": "Press \"Run on Clone Desktop\" on Home again",
+  "ja": "ホームの「分身デスクトップで実行」をもう一度押す",
+  "ko": "홈의 「분신 데스크톱에서 실행」을 다시 누르세요"
+ },
+ "分身程序": {
+  "en": "Clone program",
+  "ja": "分身プログラム",
+  "ko": "분신 프로그램"
+ },
+ "到 Windows「设置 > 帐户 > 登录选项」加一组密码": {
+  "en": "Add a password in Windows \"Settings > Accounts > Sign-in options\"",
+  "ja": "Windows の「設定 > アカウント > サインイン オプション」でパスワードを追加",
+  "ko": "Windows 「설정 > 계정 > 로그인 옵션」에서 비밀번호를 추가하세요"
+ },
+ "只允许 Windows Hello 登录": {
+  "en": "Only Windows Hello sign-in is allowed",
+  "ja": "Windows Hello サインインのみ許可されています",
+  "ko": "Windows Hello 로그인만 허용됨"
+ },
+ "可以用密码登录": {
+  "en": "Password sign-in allowed",
+  "ja": "パスワードでサインインできます",
+  "ko": "비밀번호로 로그인 가능"
+ },
+ "在左边「回报问题」送出": {
+  "en": "Send it from \"Report a problem\" on the left",
+  "ja": "左の「問題を報告」から送信",
+  "ko": "왼쪽 「문제 신고」에서 보내세요"
+ },
+ "在防毒软件（例如 360、火绒）把分身文件夹设为信任": {
+  "en": "Mark the clone folder as trusted in your antivirus (e.g. 360, Huorong)",
+  "ja": "ウイルス対策ソフト（360、火絨など）で分身フォルダーを信頼済みにする",
+  "ko": "백신 프로그램(예: 360, 화융)에서 분신 폴더를 신뢰로 설정하세요"
+ },
+ "家庭版不能用桌面分身，请用「一键完成日常」": {
+  "en": "Home edition can't use the Clone Desktop; use \"Run All Dailies\"",
+  "ja": "Home エディションでは分身デスクトップを使えません。「デイリー一括実行」を使ってください",
+  "ko": "Home 버전은 분신 데스크톱을 쓸 수 없습니다. 「일일 일괄 실행」을 쓰세요"
+ },
+ "密码打上面「要打的密码」那组，不是 PIN": {
+  "en": "Type the password shown under \"Password to type\" above, not the PIN",
+  "ja": "上の「入力するパスワード」を入力（PIN ではありません）",
+  "ko": "위 「입력할 비밀번호」를 입력하세요 (PIN 아님)"
+ },
+ "已经关掉": {
+  "en": "Turned off",
+  "ja": "オフにしました",
+  "ko": "껐습니다"
+ },
+ "已设定": {
+  "en": "Set up",
+  "ja": "設定済み",
+  "ko": "설정됨"
+ },
+ "帐户没有设密码": {
+  "en": "The account has no password",
+  "ja": "アカウントにパスワードがない",
+  "ko": "계정에 비밀번호가 없음"
+ },
+ "平常只用 PIN 或人脸开机：按 Win+L，选钥匙图示，用密码登录电脑一次": {
+  "en": "If you only sign in with PIN or face: press Win+L, pick the key icon and sign in once with the password",
+  "ja": "普段 PIN や顔認証だけでサインインしている場合：Win+L を押し、鍵アイコンを選んでパスワードで一度サインイン",
+  "ko": "평소 PIN이나 얼굴로만 로그인한다면: Win+L을 누르고 열쇠 아이콘을 골라 비밀번호로 한 번 로그인하세요"
+ },
+ "微软帐号的密码（登录微软网站用的那组），不是 PIN": {
+  "en": "Your Microsoft account password (the one for Microsoft websites), not the PIN",
+  "ja": "Microsoft アカウントのパスワード（Microsoft のサイトで使うもの）、PIN ではありません",
+  "ko": "Microsoft 계정 비밀번호 (Microsoft 웹사이트에 쓰는 것), PIN 아님"
+ },
+ "微软帐户 {name}": {
+  "en": "Microsoft account {name}",
+  "ja": "Microsoft アカウント {name}",
+  "ko": "Microsoft 계정 {name}"
+ },
+ "或把分身文件夹里的 viewer.log 传给我们": {
+  "en": "Or send us viewer.log from the clone folder",
+  "ja": "または分身フォルダーの viewer.log を送ってください",
+  "ko": "또는 분신 폴더의 viewer.log를 보내 주세요"
+ },
+ "打上面写的密码，勾「记住」": {
+  "en": "Type the password shown above and tick \"Remember\"",
+  "ja": "上に書いたパスワードを入力し、「記憶する」にチェック",
+  "ko": "위에 적힌 비밀번호를 입력하고 「기억」을 체크하세요"
+ },
+ "打开分身文件夹": {
+  "en": "Open clone folder",
+  "ja": "分身フォルダーを開く",
+  "ko": "분신 폴더 열기"
+ },
+ "按上面的「第一次设定」重新建立": {
+  "en": "Press \"First-time setup\" above to set it up again",
+  "ja": "上の「初回設定」を押して作り直す",
+  "ko": "위 「처음 설정」을 눌러 다시 만드세요"
+ },
+ "提示「分身程序不见了」": {
+  "en": "Says the clone program is missing",
+  "ja": "「分身プログラムが見つからない」と出る",
+  "ko": "「분신 프로그램이 없음」이라고 나옴"
+ },
+ "提示「登录失败」": {
+  "en": "Says sign-in failed",
+  "ja": "「サインインに失敗」と出る",
+  "ko": "「로그인 실패」라고 나옴"
+ },
+ "提示「连不上桌面分身」（代码 516 等）": {
+  "en": "Says it can't connect (code 516 etc.)",
+  "ja": "「接続できない」と出る（コード 516 など）",
+  "ko": "「연결할 수 없음」이라고 나옴 (코드 516 등)"
+ },
+ "本地帐户 {name}": {
+  "en": "Local account {name}",
+  "ja": "ローカル アカウント {name}",
+  "ko": "로컬 계정 {name}"
+ },
+ "桌面分身要 Windows 专业版，家庭版没有": {
+  "en": "The clone desktop needs Windows Pro; Home doesn't have it",
+  "ja": "分身デスクトップには Windows Pro が必要です（Home にはありません）",
+  "ko": "분신 데스크톱은 Windows Pro가 필요합니다 (Home에는 없음)"
+ },
+ "正常": {
+  "en": "OK",
+  "ja": "正常",
+  "ko": "정상"
+ },
+ "没有关掉（Windows 的确认按了「否」或改不了）": {
+  "en": "Not turned off (\"No\" was pressed, or it can't be changed)",
+  "ja": "オフになりませんでした（「いいえ」を押したか、変更できません）",
+  "ko": "끄지 못했습니다 (「아니요」를 눌렀거나 바꿀 수 없음)"
+ },
+ "没有密码的帐户进不了分身（Windows 的规定）": {
+  "en": "An account without a password can't sign in to the clone (a Windows rule)",
+  "ja": "パスワードのないアカウントは分身にサインインできません（Windows の仕様）",
+  "ko": "비밀번호가 없는 계정은 분신에 로그인할 수 없습니다 (Windows 규칙)"
+ },
+ "没有打开（Windows 的确认按了「否」或改不了）": {
+  "en": "Not turned on (\"No\" was pressed, or it can't be changed)",
+  "ja": "オンになりませんでした（「いいえ」を押したか、変更できません）",
+  "ko": "켜지 못했습니다 (「아니요」를 눌렀거나 바꿀 수 없음)"
+ },
+ "没有输入密码，桌面分身没有打开": {
+  "en": "No password typed, so the Clone Desktop didn't open",
+  "ja": "パスワードが入力されなかったため、分身デスクトップは開きませんでした",
+  "ko": "비밀번호를 입력하지 않아 분신 데스크톱이 열리지 않았습니다"
+ },
+ "没能登录桌面分身，请看左边「桌面分身」页的「登录失败」": {
+  "en": "Couldn't sign in to the Clone Desktop. See \"Sign-in failed\" on the \"Clone Desktop\" page on the left",
+  "ja": "分身デスクトップにサインインできませんでした。左の「分身デスクトップ」ページの「サインインに失敗」を見てください",
+  "ko": "분신 데스크톱에 로그인하지 못했습니다. 왼쪽 「분신 데스크톱」 페이지의 「로그인 실패」를 보세요"
+ },
+ "用过系统优化／精简工具或 RDP Wrapper 的电脑，可能不能用": {
+  "en": "PCs that used system optimiser/trimming tools or RDP Wrapper may not work",
+  "ja": "システム最適化・軽量化ツールや RDP Wrapper を使った PC では使えないことがあります",
+  "ko": "시스템 최적화/경량화 도구나 RDP Wrapper를 쓴 PC는 안 될 수 있습니다"
+ },
+ "登录帐户": {
+  "en": "Sign-in account",
+  "ja": "サインイン アカウント",
+  "ko": "로그인 계정"
+ },
+ "第一次怎么用": {
+  "en": "First time",
+  "ja": "はじめて使うとき",
+  "ko": "처음 사용할 때"
+ },
+ "被停用了": {
+  "en": "Disabled",
+  "ja": "無効になっています",
+  "ko": "사용 안 함으로 되어 있음"
+ },
+ "要 Windows 专业版；怎么设定看左边「桌面分身」页": {
+  "en": "Needs Windows Pro; see the \"Clone Desktop\" page on the left for setup",
+  "ja": "Windows Pro が必要。設定は左の「分身デスクトップ」ページへ",
+  "ko": "Windows Pro 필요. 설정은 왼쪽 「분신 데스크톱」 페이지를 보세요"
+ },
+ "要打的密码": {
+  "en": "Password to type",
+  "ja": "入力するパスワード",
+  "ko": "입력할 비밀번호"
+ },
+ "认不出是哪种帐户": {
+  "en": "Can't tell the account type",
+  "ja": "アカウントの種類を判別できません",
+  "ko": "계정 종류를 알 수 없음"
+ },
+ "设定好后，回来这页看一次": {
+  "en": "After setup, come back to this page",
+  "ja": "設定が終わったら、このページを見直してください",
+  "ko": "설정 후 이 페이지를 다시 보세요"
+ },
+ "请用「一键完成日常」": {
+  "en": "Use \"Run All Dailies\"",
+  "ja": "「デイリー一括実行」を使ってください",
+  "ko": "「일일 일괄 실행」을 쓰세요"
+ },
+ "边跑边用电脑；进不去就照这页做": {
+  "en": "Use your PC while it runs; can't get in? Follow this page",
+  "ja": "実行中も PC を使えます。入れないときはこのページの通りに",
+  "ko": "실행 중에도 PC를 쓸 수 있습니다. 들어가지 못하면 이 페이지대로 하세요"
+ },
+ "还是不行": {
+  "en": "Still not working",
+  "ja": "それでもだめなとき",
+  "ko": "그래도 안 될 때"
+ },
+ "还没设定": {
+  "en": "Not set up yet",
+  "ja": "まだ設定していません",
+  "ko": "아직 설정 안 함"
+ },
+ "这台电脑没有（精简版 Windows），不能用": {
+  "en": "This PC doesn't have it (trimmed Windows), can't use",
+  "ja": "この PC にはありません（軽量版 Windows）。使えません",
+  "ko": "이 PC에는 없습니다 (경량 Windows). 사용 불가"
+ },
+ "这台电脑的开机密码，不是 PIN": {
+  "en": "This PC's sign-in password, not the PIN",
+  "ja": "この PC のサインイン パスワード（PIN ではありません）",
+  "ko": "이 PC의 로그인 비밀번호 (PIN 아님)"
+ },
+ "这台电脑（自动检查）": {
+  "en": "This PC (checked automatically)",
+  "ja": "この PC（自動チェック）",
+  "ko": "이 PC (자동 확인)"
+ },
+ "远程桌面服务": {
+  "en": "Remote Desktop Services",
+  "ja": "リモート デスクトップ サービス",
+  "ko": "원격 데스크톱 서비스"
+ },
+ "遇到问题（点开看做法）": {
+  "en": "Problems (click for steps)",
+  "ja": "困ったとき（クリックで手順）",
+  "ko": "문제가 생기면 (눌러서 방법 보기)"
+ },
+ "重新开机后再试（刚设定完常要重新开机）": {
+  "en": "Restart the PC and try again (often needed right after setup)",
+  "ja": "PC を再起動してもう一度（設定直後はよく必要です）",
+  "ko": "PC를 다시 시작하고 다시 해 보세요 (설정 직후 자주 필요)"
+ },
+ "首页按「在桌面分身跑」": {
+  "en": "Press \"Run on Clone Desktop\" on Home",
+  "ja": "ホームで「分身デスクトップで実行」を押す",
+  "ko": "홈에서 「분신 데스크톱에서 실행」을 누르세요"
+ },
+ "首页没有「在桌面分身跑」": {
+  "en": "No \"Run on Clone Desktop\" on Home",
+  "ja": "ホームに「分身デスクトップで実行」がない",
+  "ko": "홈에 「분신 데스크톱에서 실행」이 없음"
+ },
+ "进不去？看教学": {
+  "en": "Can't get in? See guide",
+  "ja": "入れないときはガイドへ",
+  "ko": "못 들어가나요? 안내 보기"
  }
 }

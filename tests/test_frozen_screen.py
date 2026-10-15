@@ -156,6 +156,69 @@ class RunWatchedTest(unittest.TestCase):
             self.assertFalse(cls.frozen_retry, cls.__name__)
 
 
+class StuckStepAndEscapeTest(unittest.TestCase):
+    """Leo 2026-10-14 「一直沒有識別到那就按esc 而且要跟用戶說明是哪裡卡住觸發了這個」."""
+
+    def _task(self, step="点击快速切换按钮"):
+        task = RunWatchedTest._task(self, retry=False)
+        task._last_step = f"测试：{step}。"
+        task.tap_escape = mock.Mock(return_value=True)
+        return task
+
+    def _run_frozen(self, task, on_home=False):
+        def run(_t):
+            raise FrozenScreen()
+
+        with mock.patch("src.tasks.recovery.home_now", return_value=on_home):
+            self.assertFalse(base_module._run_watched(task, run, (), {}, watched=True))
+
+    def test_the_reason_names_the_step_and_esc_is_pressed(self):
+        task = self._task()
+        self._run_frozen(task)
+        task.tap_escape.assert_called_once()
+        self.assertTrue(task._why.startswith("卡在「点击快速切换按钮」："), task._why)
+        self.assertIn(f"画面 {FROZEN_SCREEN_SECONDS:.0f} 秒没有变化", task._why)
+        self.assertTrue(task._why.endswith("已按 Esc"), task._why)
+
+    def test_the_stage_shown_to_the_player_comes_first(self):
+        task = self._task()
+        with mock.patch.object(base_module.problem_report, "_stage", return_value="选择广场卡带2号位"):
+            self._run_frozen(task)
+        self.assertTrue(task._why.startswith("卡在「选择广场卡带2号位」"), task._why)
+
+    def test_no_esc_on_home_where_it_opens_the_quit_dialog(self):
+        task = self._task()
+        self._run_frozen(task, on_home=True)
+        task.tap_escape.assert_not_called()
+        self.assertNotIn("Esc", task._why)
+
+    def test_the_limit_is_ten_seconds(self):
+        self.assertEqual(10.0, FROZEN_SCREEN_SECONDS)
+
+
+class WaitLimitsTest(unittest.TestCase):
+    def test_saved_long_waits_are_capped(self):
+        from src.utils.wait_limits import STUCK_SECONDS, capped
+
+        self.assertEqual(STUCK_SECONDS, capped(35.0))
+        self.assertEqual(6.0, capped("6"))
+        self.assertEqual(8.0, capped(15, 8.0))
+        self.assertEqual(STUCK_SECONDS, capped(None))
+
+    def test_still_timer_counts_from_the_last_movement(self):
+        from src.utils.wait_limits import StillTimer
+
+        timer = StillTimer()
+        still = np.full((80, 80, 3), 40, np.uint8)
+        moved = np.full((80, 80, 3), 90, np.uint8)
+        self.assertEqual(0.0, timer.still_for(still, 0.0))
+        self.assertEqual(4.0, timer.still_for(still, 4.0))
+        self.assertEqual(0.0, timer.still_for(moved, 5.0))
+        sparkle = moved.copy()
+        sparkle[:8, :8] = 255  # a small change is not movement
+        self.assertEqual(6.0, timer.still_for(sparkle, 11.0))
+
+
 class RecoveryRestsTheWatchTest(unittest.TestCase):
     def test_going_home_does_not_count_as_stuck(self):
         from src.tasks import recovery
@@ -176,3 +239,27 @@ class RecoveryRestsTheWatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgressWaitTest(unittest.TestCase):
+    def test_loading_and_movement_do_not_count_a_still_screen_does(self):
+        from src.utils.wait_limits import STUCK_SECONDS, ProgressWait, is_loading_dark
+
+        black = np.full((80, 80, 3), 10, np.uint8)
+        still = np.full((80, 80, 3), 120, np.uint8)
+        self.assertTrue(is_loading_dark(black))
+        self.assertFalse(is_loading_dark(still))
+        self.assertFalse(is_loading_dark(np.zeros((80, 80, 3), np.uint8)))
+        wait = ProgressWait(0.0)
+        for t in range(0, 20):
+            self.assertFalse(wait.over(black, float(t), loading=True))
+        self.assertFalse(wait.over(still, 20.0))
+        self.assertFalse(wait.over(still, 20.0 + STUCK_SECONDS - 1))
+        self.assertTrue(wait.over(still, 20.0 + STUCK_SECONDS))
+
+    def test_the_cap_ends_even_a_loading_wait(self):
+        from src.utils.wait_limits import LOADING_MAX_SECONDS, ProgressWait
+
+        wait = ProgressWait(0.0)
+        black = np.full((80, 80, 3), 10, np.uint8)
+        self.assertTrue(wait.over(black, LOADING_MAX_SECONDS, loading=True))

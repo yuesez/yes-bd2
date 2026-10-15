@@ -174,7 +174,7 @@
   "收藏重建周期": "Rebuild Favorite",
   "改了马上生效": "Takes effect right away",
   "料理清单": "Recipe list",
-  "开启后，5★ 角色的 SR 专用装备也会分解；关闭时保留（默认）。": "When on, SR Exclusive Gear of 5★ Characters is dismantled too; when off it is kept (default).",
+  "开启后，SR 不点开，和 R 一样直接分解；关闭时点开核对，5★ 角色的保留（默认）。": "When on, SR is dismantled without opening it, like R; when off it is opened and checked, and 5★ Characters' is kept (default).",
   "日": "Sun",
   "日常设定": "Daily Setup",
   "日志资料夹": "Logs folder",
@@ -463,7 +463,11 @@
   "知道了": "Got it",
   "双倍时米饭打哪里，现在可以自己选，也能打狩猎场。设定在「任务设定」里。": "You can now choose where rice goes on double days, Hunting Ground included. It's under \"Task Setup\".",
   "双倍时米饭打哪里": "Where rice goes on double days",
-  "每行选一个：金币、史莱姆或狩猎场，都用 MAX。已照你原本的设定开好，确认一下就好。": "Pick one per row: Gold, Slime or Hunting Ground, always MAX. Already set to match your old settings, just check them."
+  "每行选一个：金币、史莱姆或狩猎场，都用 MAX。已照你原本的设定开好，确认一下就好。": "Pick one per row: Gold, Slime or Hunting Ground, always MAX. Already set to match your old settings, just check them.",
+  "战斗倍数": "Multiplier",
+  "倍": "x",
+  "场": "battles",
+  "{used} / {free} 杯": "{used} / {free} cups"
  },
  "not_on_souseha": {
   "小屋": "House",
@@ -508,5 +512,9 @@
   "召唤物": "summon",
   "爆发": "Burst",
   "攻击 / 击退 / 阵亡": "Attack / Knockback / KO"
- }
+ },
+ "活动战斗设定有更新": "Event Battle settings changed",
+ "「只刷普通难度」改成默认不勾，挑战战斗会推到你选的最高关卡。设定在「任务设定」里。": "\"Normal only\" is now off by default, so Challenge pushes up to the highest stage you pick. It's under \"Task Setup\".",
+ "活动战斗设定": "Event Battle settings",
+ "「只刷普通难度」已关掉，想只打普通战斗再打开。「挑战战斗最高关卡」可选第5、10、15关，推到后剩下的AP用快速战斗刷这一关。": "\"Normal only\" is now off; turn it on if you only want Normal. \"Challenge highest stage\" can be 5, 10 or 15; once reached, leftover AP quick-battles that stage."
 }
