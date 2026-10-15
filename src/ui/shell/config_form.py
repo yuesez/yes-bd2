@@ -26,6 +26,7 @@ from src.ui.shell.widgets import (
     t,
     vbox,
 )
+from src.utils import pvp_week
 
 SEGMENTED_MAX_TEXT = 26
 # Task class -> the only settings that keep their ⓘ hint (Leo, 2026-10-04:
@@ -48,9 +49,21 @@ def _pvp_panel(task, parent, on_change):
 
 
 # Task class -> (settings shown by one panel of their own, panel factory).
-# 镜中之战: 倍数 and 场数 as steppers that keep 倍数 × 场数 ≤ 40 (Leo 2026-10-14).
+# 镜中之战: 倍数 and 场数 as steppers that keep 倍数 × 场数 ≤ 40 (Leo 2026-10-14),
+# plus the 按星期切换倍率 periods (Leo 2026-10-15).
 PANELS = {
-    "PVPTask": (("竞技场战斗倍数", "战斗场数"), _pvp_panel),
+    "PVPTask": (
+        (
+            "竞技场战斗倍数",
+            "战斗场数",
+            pvp_week.ENABLED_KEY,
+            pvp_week.WEEKDAY_MULTIPLIER_KEY,
+            pvp_week.WEEKDAY_COUNT_KEY,
+            pvp_week.WEEKEND_MULTIPLIER_KEY,
+            pvp_week.WEEKEND_COUNT_KEY,
+        ),
+        _pvp_panel,
+    ),
 }
 
 

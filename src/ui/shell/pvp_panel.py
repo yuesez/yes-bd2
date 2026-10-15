@@ -6,6 +6,10 @@ before.  倍数 × 场数 never goes over the 40 free cocktails a day: 场数 ca
 go up to 40 ÷ 倍数, and a bigger 倍数 lowers 场数.  The game's 仅使用免费 /
 自动跳过战斗 switches are not shown (Leo: 鎖住的不要); the run checks 仅使用免费
 itself.
+
+按星期切换倍率 (Leo 2026-10-15) adds one 倍数/场数 pair for 周一~周四 and one for
+周五~周日; while it is 开 those two pairs replace the ones above, which dim out.
+The same 倍数 × 场数 ≤ 40 limit holds inside each pair.
 """
 
 from __future__ import annotations
@@ -19,6 +23,23 @@ from qfluentwidgets import RoundMenu, isDarkTheme
 
 from src.ui.shell import motion, theme
 from src.ui.shell.widgets import Button, Text, hbox, tf
+from src.utils.pvp_week import (
+    COUNT_OPTIONS as WEEK_COUNT_OPTIONS,
+)
+from src.utils.pvp_week import (
+    ENABLED_KEY as WEEK_ENABLED_KEY,
+)
+from src.utils.pvp_week import (
+    MULTIPLIER_OPTIONS as WEEK_MULTIPLIER_OPTIONS,
+)
+from src.utils.pvp_week import (
+    WEEKDAY_COUNT_KEY,
+    WEEKDAY_MULTIPLIER_KEY,
+    WEEKDAY_PRESET_NAME,
+    WEEKEND_COUNT_KEY,
+    WEEKEND_MULTIPLIER_KEY,
+    WEEKEND_PRESET_NAME,
+)
 
 MULTIPLIER_KEY = "竞技场战斗倍数"
 COUNT_KEY = "战斗场数"
@@ -26,6 +47,8 @@ COUNT_MAX = "MAX"
 FREE_COCKTAILS = 40
 # The ▾ list of 倍数: the ones that use all 40 cocktails with whole 场数.
 MULTIPLIER_CHOICES = [1, 2, 4, 5, 8, 10, 20, 40]
+WEEK_ON = "开"
+WEEK_OFF = "关闭"
 
 
 def max_count(multiplier: int) -> int:
@@ -153,10 +176,31 @@ class PvpPanel(QWidget):
         grid.setVerticalSpacing(12)
         grid.setColumnStretch(1, 1)
 
+        # 按星期切换倍率: one 倍数/场数 pair per period (Leo 2026-10-15).
+        self.week_button = Button("", "flat", parent=self)
+        self.week_button.setCheckable(True)
+        self.week_button.clicked.connect(self._toggle_week)
+        self.week_button.setStyleSheet(
+            "QPushButton { min-height: 32px; max-height: 32px; border-radius: 16px;"
+            " padding: 0px 14px; font-size: 13px; }"
+        )
+        grid.addWidget(Text("按星期切换倍率", "sub"), 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(self.week_button, 0, 1, Qt.AlignRight | Qt.AlignVCenter)
+
+        row = 1
+        self.weekday_multiplier, self.weekday_count, row = self._add_week_pair(
+            grid, row, WEEKDAY_PRESET_NAME, WEEKDAY_MULTIPLIER_KEY, WEEKDAY_COUNT_KEY
+        )
+        self.weekend_multiplier, self.weekend_count, row = self._add_week_pair(
+            grid, row, WEEKEND_PRESET_NAME, WEEKEND_MULTIPLIER_KEY, WEEKEND_COUNT_KEY
+        )
+
         self.multiplier = Stepper("倍", self)
         self.multiplier.picked.connect(self._set_multiplier)
-        grid.addWidget(Text("战斗倍数", "sub"), 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        grid.addWidget(self.multiplier, 0, 1, Qt.AlignRight | Qt.AlignVCenter)
+        self.base_multiplier_label = Text("战斗倍数", "sub")
+        grid.addWidget(self.base_multiplier_label, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(self.multiplier, row, 1, Qt.AlignRight | Qt.AlignVCenter)
+        row += 1
 
         count_box = QWidget(self)
         count_row = hbox(count_box, (0, 0, 0, 0), 8)
@@ -167,21 +211,48 @@ class PvpPanel(QWidget):
         self.count.picked.connect(self._set_count)
         count_row.addWidget(self.max_button)
         count_row.addWidget(self.count)
-        grid.addWidget(Text("战斗场数", "sub"), 1, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        grid.addWidget(count_box, 1, 1, Qt.AlignRight | Qt.AlignVCenter)
+        self.base_count_label = Text("战斗场数", "sub")
+        grid.addWidget(self.base_count_label, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(count_box, row, 1, Qt.AlignRight | Qt.AlignVCenter)
+        row += 1
 
         # How many of the day's free cocktails this run uses (Leo: no bar, 狀態條不好看).
         self.cups_text = Text("", "h3")
-        grid.addWidget(Text("免费鸡尾酒", "sub"), 2, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        grid.addWidget(self.cups_text, 2, 1, Qt.AlignRight | Qt.AlignVCenter)
+        grid.addWidget(Text("免费鸡尾酒", "sub"), row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(self.cups_text, row, 1, Qt.AlignRight | Qt.AlignVCenter)
         self._restyle()
         theme.on_theme_changed(self, self._restyle)
         self.sync()
 
+    def _add_week_pair(
+        self,
+        grid: QGridLayout,
+        row: int,
+        name: str,
+        multiplier_key: str,
+        count_key: str,
+    ) -> tuple["Stepper", "Stepper", int]:
+        """One period's [倍数] × [场数] on the row after its label row."""
+        label = Text(name, "sub")
+        grid.addWidget(label, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        multiplier = Stepper("倍", self)
+        multiplier.picked.connect(
+            lambda value, key=multiplier_key: self._set_week_multiplier(key, value)
+        )
+        count = Stepper("场", self)
+        count.picked.connect(lambda value, key=count_key: self._set_week_count(key, value))
+        pair = QWidget(self)
+        pair_row = hbox(pair, (0, 0, 0, 0), 6)
+        pair_row.addWidget(multiplier)
+        pair_row.addWidget(Text("×", "sub"))
+        pair_row.addWidget(count)
+        grid.addWidget(pair, row, 1, Qt.AlignRight | Qt.AlignVCenter)
+        return multiplier, count, row + 1
+
     def _restyle(self) -> None:
         tk = theme.tokens()
         dark = isDarkTheme()
-        self.max_button.setStyleSheet(
+        style = (
             f"QPushButton {{ min-height: 32px; max-height: 32px; border-radius: 16px;"
             f" padding: 0px 14px; font-size: 13px;"
             f" background: {tk['inset'] if dark else tk['card']};"
@@ -191,6 +262,8 @@ class PvpPanel(QWidget):
             f"QPushButton:checked {{ background: {tk['accent']}; color: {tk['on_accent']};"
             f" border-color: {tk['accent']}; font-weight: 700; }}"
         )
+        self.max_button.setStyleSheet(style)
+        self.week_button.setStyleSheet(style)
 
     # ------------------------------------------------------------ values
 
@@ -238,6 +311,50 @@ class PvpPanel(QWidget):
         self._write(COUNT_KEY, COUNT_MAX if on else str(self._count()))
         self.sync()
 
+    # ------------------------------------------------------- 按星期切换
+
+    def _week_enabled(self) -> bool:
+        return str(self.task.config.get(WEEK_ENABLED_KEY, WEEK_OFF)).strip() == WEEK_ON
+
+    def _week_multiplier(self, key: str, fallback: int) -> int:
+        try:
+            value = int(str(self.task.config.get(key) or fallback).replace("倍", "").strip())
+        except (TypeError, ValueError):
+            value = fallback
+        return min(FREE_COCKTAILS, max(1, value))
+
+    def _week_count(self, multiplier_key: str, count_key: str) -> int:
+        multiplier = self._week_multiplier(
+            multiplier_key, FREE_COCKTAILS if multiplier_key == WEEKEND_MULTIPLIER_KEY else 1
+        )
+        top = max_count(multiplier)
+        try:
+            value = int(str(self.task.config.get(count_key) or 1))
+        except (TypeError, ValueError):
+            value = 1
+        return min(top, max(1, value))
+
+    def _toggle_week(self, on: bool) -> None:
+        self._write(WEEK_ENABLED_KEY, WEEK_ON if on else WEEK_OFF)
+        self.sync()
+
+    def _set_week_multiplier(self, key: str, value: int) -> None:
+        multiplier = min(FREE_COCKTAILS, max(1, int(value)))
+        self._write(key, multiplier)
+        count_key = WEEKEND_COUNT_KEY if key == WEEKEND_MULTIPLIER_KEY else WEEKDAY_COUNT_KEY
+        # 倍数 × 场数 ≤ 40: a bigger 倍数 lowers 场数.
+        top = max_count(multiplier)
+        self._write(count_key, str(min(self._week_count(key, count_key), top)))
+        self.sync()
+
+    def _set_week_count(self, key: str, value: int) -> None:
+        multiplier_key = (
+            WEEKEND_MULTIPLIER_KEY if key == WEEKEND_COUNT_KEY else WEEKDAY_MULTIPLIER_KEY
+        )
+        top = max_count(self._week_multiplier(multiplier_key, FREE_COCKTAILS))
+        self._write(key, str(min(top, max(1, int(value)))))
+        self.sync()
+
     # ------------------------------------------------------------ state
 
     def sync(self) -> None:
@@ -245,6 +362,7 @@ class PvpPanel(QWidget):
         count = self._count()
         top = max_count(multiplier)
         is_max = self._is_max()
+        enabled = self._week_enabled()
         self.multiplier.set_state(
             multiplier, MULTIPLIER_CHOICES, multiplier > 1, multiplier < FREE_COCKTAILS
         )
@@ -252,5 +370,35 @@ class PvpPanel(QWidget):
             count, list(range(1, top + 1)), not is_max and count > 1, not is_max and count < top
         )
         self.max_button.setChecked(is_max)
-        used = multiplier * count
+        # 按星期 is on: the two period pairs replace the pair above, which dims out.
+        self.week_button.setChecked(enabled)
+        self.week_button.setText(tf("按星期 {state} ▾", state=WEEK_ON if enabled else WEEK_OFF))
+        weekday_multiplier = self._week_multiplier(WEEKDAY_MULTIPLIER_KEY, 1)
+        weekend_multiplier = self._week_multiplier(WEEKEND_MULTIPLIER_KEY, FREE_COCKTAILS)
+        weekday_count = self._week_count(WEEKDAY_MULTIPLIER_KEY, WEEKDAY_COUNT_KEY)
+        weekend_count = self._week_count(WEEKEND_MULTIPLIER_KEY, WEEKEND_COUNT_KEY)
+        for stepper, value in (
+            (self.weekday_multiplier, weekday_multiplier),
+            (self.weekend_multiplier, weekend_multiplier),
+        ):
+            stepper.set_state(
+                value,
+                WEEK_MULTIPLIER_OPTIONS,
+                enabled and value > 1,
+                enabled and value < FREE_COCKTAILS,
+            )
+        for stepper, value in (
+            (self.weekday_count, weekday_count),
+            (self.weekend_count, weekend_count),
+        ):
+            stepper.set_state(value, WEEK_COUNT_OPTIONS, enabled and value > 1, enabled)
+        for widget in (self.multiplier, self.count, self.max_button):
+            widget.setEnabled(not enabled)
+        for widget in (self.base_multiplier_label, self.base_count_label):
+            widget.setEnabled(not enabled)
+        if enabled:
+            # Either period can be the one that runs today; show the fuller one.
+            used = max(weekday_multiplier * weekday_count, weekend_multiplier * weekend_count)
+        else:
+            used = multiplier * count
         self.cups_text.set_text(tf("{used} / {free} 杯", used=used, free=FREE_COCKTAILS))

@@ -71,6 +71,27 @@ from src.utils.pvp_dialog import (
     parse_multiplier,
     parse_start_cost,
 )
+from src.utils.pvp_week import (
+    COUNT_OPTIONS as WEEK_COUNT_OPTIONS,
+)
+from src.utils.pvp_week import (
+    ENABLED_KEY as WEEK_ENABLED_KEY,
+)
+from src.utils.pvp_week import (
+    ENABLED_OPTIONS as WEEK_ENABLED_OPTIONS,
+)
+from src.utils.pvp_week import (
+    MULTIPLIER_OPTIONS as WEEK_MULTIPLIER_OPTIONS,
+)
+from src.utils.pvp_week import (
+    WEEKDAY_COUNT_KEY,
+    WEEKDAY_MULTIPLIER_KEY,
+    WEEKEND_COUNT_KEY,
+    WEEKEND_MULTIPLIER_KEY,
+)
+from src.utils.pvp_week import (
+    active_preset as active_week_preset,
+)
 from src.utils.stage_walk import NUDGE_SEQUENCE, find_stage, plan_step
 from src.utils.wait_limits import (
     LOADING_MAX_SECONDS,
@@ -333,6 +354,13 @@ class PVPTask(BaseBD2Task):
                 "PVP 舞台阈值": 0.72,
                 "舞台移动方式": STAGE_MOVE_CLICK,
                 "战斗场数": "1",
+                # 按星期切换倍率（Leo 2026-10-15）：周一到周四一套、周五到周日另一套。
+                # 关掉时下面五项都不看，仍然只读上面那两个键。
+                WEEK_ENABLED_KEY: "关闭",
+                WEEKDAY_MULTIPLIER_KEY: 40,
+                WEEKDAY_COUNT_KEY: "1",
+                WEEKEND_MULTIPLIER_KEY: 1,
+                WEEKEND_COUNT_KEY: "40",
                 "PVP 定位修正阈值": 0.76,
                 "loading 出现等待秒数": 6.0,
                 "loading 消失等待秒数": LOADING_MAX_SECONDS,
@@ -342,6 +370,17 @@ class PVPTask(BaseBD2Task):
             {
                 "舞台移动方式": {"type": "drop_down", "options": STAGE_MOVE_OPTIONS},
                 "战斗场数": {"type": "drop_down", "options": BATTLE_COUNT_OPTIONS},
+                WEEK_ENABLED_KEY: {"type": "drop_down", "options": WEEK_ENABLED_OPTIONS},
+                WEEKDAY_MULTIPLIER_KEY: {
+                    "type": "drop_down",
+                    "options": WEEK_MULTIPLIER_OPTIONS,
+                },
+                WEEKDAY_COUNT_KEY: {"type": "drop_down", "options": WEEK_COUNT_OPTIONS},
+                WEEKEND_MULTIPLIER_KEY: {
+                    "type": "drop_down",
+                    "options": WEEK_MULTIPLIER_OPTIONS,
+                },
+                WEEKEND_COUNT_KEY: {"type": "drop_down", "options": WEEK_COUNT_OPTIONS},
             }
         )
         self.config_description.update(
@@ -354,6 +393,24 @@ class PVPTask(BaseBD2Task):
                     "自动战斗的场数（默认 1）；MAX 用完当天的免费鸡尾酒。倍数 × 场数超过 40 时自动减少场数。开打前会核对"
                     "「战斗开始」上的消耗 = 倍数 × 场数，且不超过顶部免费鸡尾酒数，"
                     "并确认「仅使用免费鲜血鸡尾酒」已开启，否则取消不打。"
+                ),
+                WEEK_ENABLED_KEY: (
+                    "「开」时改用下面两个时段的设定，上面的「竞技场战斗倍数」和「战斗场数」会被忽略；"
+                    "「关闭」时跟以前一样只用上面那两个。时段按游戏日算，"
+                    "每天的 08:00（北京时间）换日，所以周一 08:00 整才切到周一到周四的设定。"
+                ),
+                WEEKDAY_MULTIPLIER_KEY: (
+                    "周一~周四用的战斗倍数（1~40）。设定为 40 倍、1 场，"
+                    "就是当天一次打完 40 杯免费鸡尾酒。"
+                ),
+                WEEKDAY_COUNT_KEY: (
+                    "周一~周四在这个倍数下打的场数；倍数 × 场数超过 40 时自动减少场数。"
+                ),
+                WEEKEND_MULTIPLIER_KEY: (
+                    "周五~周日用的战斗倍数（1~40）。设定为 1 倍、40 场就是当天打满 40 场。"
+                ),
+                WEEKEND_COUNT_KEY: (
+                    "周五~周日在这个倍数下打的场数；倍数 × 场数超过 40 时自动减少场数。"
                 ),
                 "舞台移动方式": (
                     "游戏设置为点击移动时选「鼠标点击舞台」；用 WASD 移动的玩家选"
@@ -384,17 +441,27 @@ class PVPTask(BaseBD2Task):
             self.log_info("镜中之战已禁用。")
             return True
 
+        # Called through the class with just the config, like _target_multiplier's
+        # callers: the run is also driven by stand-in task objects in tests.
+        preset = PVPTask._week_preset(self.config)
         target_multiplier = self._target_multiplier()
         self.info_set("状态", "镜中之战启动。")
         self.info_set("目标倍率", target_multiplier)
-        self.log_info(f"镜中之战：目标倍率 {target_multiplier}。")
+        if preset is None:
+            self.log_info(f"镜中之战：目标倍率 {target_multiplier}。")
+        else:
+            self.log_info(
+                f"镜中之战：{preset.name}，目标倍率 {target_multiplier}、"
+                f"场数 {preset.count}（按星期切换已开）。"
+            )
 
         if not self._ensure_pvp_hub():
             self.info_set("状态", "镜中之战失败：未能进入 PVP 箱庭。")
             return False
 
         current_multiplier = target_multiplier
-        self._battle_count_override = None
+        # 星期制的场数走这个 override：上面那一格「战斗场数」只留给关掉时用。
+        self._battle_count_override = preset.count if preset is not None else None
         max_rounds = PVP_MAX_ROUNDS
         for round_index in range(1, max_rounds + 1):
             self.info_set("当前阶段", f"第 {round_index} 轮")
@@ -2657,7 +2724,17 @@ class PVPTask(BaseBD2Task):
         normalized = PVPTask._normalize_text(text)
         return normalized.replace("倍", "").replace("o", "0")
 
+    @staticmethod
+    def _week_preset(config):
+        """今天的时段设定；「按星期切换倍率」没开时为 None（跟以前一样）。"""
+        if str(config.get(WEEK_ENABLED_KEY, "关闭")).strip() != "开":
+            return None
+        return active_week_preset(config)
+
     def _target_multiplier(self) -> int:
+        preset = PVPTask._week_preset(self.config)
+        if preset is not None:
+            return preset.multiplier
         raw = str(self.config.get("竞技场战斗倍数", 1)).replace("倍", "")
         try:
             multiplier = int(raw)
