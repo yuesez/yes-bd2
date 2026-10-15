@@ -20,6 +20,7 @@
 param(
     [switch]$SkipTests,
     [switch]$Push,
+    [string]$Ref = "upstream/main",
     [string]$Python = ""
 )
 
@@ -109,7 +110,7 @@ if ($fetch.Code -ne 0) {
     exit 1
 }
 
-$behind = [int]((Invoke-Git -Arguments @("rev-list", "--count", "$branch..upstream/main")).Output |
+$behind = [int]((Invoke-Git -Arguments @("rev-list", "--count", "$branch..$Ref")).Output |
     Select-Object -First 1)
 if ($behind -eq 0) {
     Write-Host "==> 官方没有新提交，不用合并。" -ForegroundColor Green
@@ -117,7 +118,7 @@ if ($behind -eq 0) {
 }
 
 Write-Host "==> 官方有 $behind 个新提交:" -ForegroundColor Yellow
-(Invoke-Git -Arguments @("log", "--oneline", "--no-decorate", "$branch..upstream/main")).Output |
+(Invoke-Git -Arguments @("log", "--oneline", "--no-decorate", "$branch..$Ref")).Output |
     Select-Object -First 20 | ForEach-Object { Write-Host "  $_" }
 
 $beforeLog = Join-Path $reportDir "before-$branch.txt"
@@ -132,8 +133,8 @@ if (-not $SkipTests) {
 
 $before_sha = (Invoke-Git -Arguments @("rev-parse", "HEAD")).Output | Select-Object -First 1
 Write-Host ""
-Write-Host "==> 合并 upstream/main 到 $branch ..."
-$merge = Invoke-Git -Arguments @("merge", "upstream/main", "--no-edit")
+Write-Host "==> 合并 $Ref 到 $branch ..."
+$merge = Invoke-Git -Arguments @("merge", $Ref, "--no-edit")
 $merge.Output | ForEach-Object { Write-Host "  $_" }
 if ($merge.Code -ne 0) {
     Write-Host ""
@@ -177,3 +178,4 @@ if ($Push) {
 Write-Host ""
 Write-Host "==> 记得确认自己的改动还在："
 Write-Host "  .\scripts\check_custom_changes.ps1"
+
