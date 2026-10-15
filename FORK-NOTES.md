@@ -39,9 +39,24 @@ cd D:\YES-BD2
 git add -A
 git commit -m "说清楚改了什么"
 git push
+
+# 5. 确认自己的改动还在（合并、官方更新、同步之后都值得跑一次）
+.\scripts\check_custom_changes.ps1
 ```
 
 `check_upstream.ps1` 也可以顺手推：`.\scripts\check_upstream.ps1 -Merge -Push`。
+
+## 两个脚本的分工
+
+| 脚本 | 什么时候跑 | 做什么 |
+|---|---|---|
+| `scripts\check_upstream.ps1` | **动手改之前**（规矩） | 看官方有没有新提交；`-Merge` 就合进来 |
+| `scripts\check_custom_changes.ps1` | 合并后、同步安装版后 | 查自己的改动有没有被覆盖掉 |
+
+第二个脚本不用维护清单：它用 `git diff upstream/main...HEAD` 自己算出你改了哪些
+文件，再逐个比对源码版和安装版。以后你再加新功能，它自动把新文件也算进去。
+只有 `src\` 下的 `.py` 会被当成「必须一致」——文档、脚本、测试、`run.bat` 不影响
+工具运行，安装版里没有它们不算问题。
 
 ## 为什么必须先合再改
 
