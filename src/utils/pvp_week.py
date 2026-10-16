@@ -40,6 +40,10 @@ WEEKEND_PRESET_NAME = "周五~周日"
 # 40 free cocktails a day, so 倍数 × 场数 cannot ask for more.
 FREE_COCKTAILS = 40
 
+# 这项是「加在原有行为之上」的可选项，缺省必须是「关闭」：缺省开会让所有已经
+# 设置好「竞技场战斗倍数 / 战斗场数」的人被悄悄改掉行为（Leo 2026-10-16 实测：
+# 把默认改成「开」后 7 个测试立刻失败，它们用的就是没设这个键的旧配置）。
+ENABLED_DEFAULT = "关闭"
 ENABLED_OPTIONS = ["关闭", "开"]
 COUNT_OPTIONS = [str(count) for count in range(COUNT_LOW, COUNT_HIGH + 1)]
 MULTIPLIER_OPTIONS = [str(value) for value in (1, 2, 4, 5, 8, 10, 20, 40)]

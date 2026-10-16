@@ -75,6 +75,9 @@ from src.utils.pvp_week import (
     COUNT_OPTIONS as WEEK_COUNT_OPTIONS,
 )
 from src.utils.pvp_week import (
+    ENABLED_DEFAULT as WEEK_ENABLED_DEFAULT,
+)
+from src.utils.pvp_week import (
     ENABLED_KEY as WEEK_ENABLED_KEY,
 )
 from src.utils.pvp_week import (
@@ -356,7 +359,7 @@ class PVPTask(BaseBD2Task):
                 "战斗场数": "1",
                 # 按星期切换倍率（Leo 2026-10-15）：周一到周四一套、周五到周日另一套。
                 # 关掉时下面五项都不看，仍然只读上面那两个键。
-                WEEK_ENABLED_KEY: "关闭",
+                WEEK_ENABLED_KEY: WEEK_ENABLED_DEFAULT,
                 WEEKDAY_MULTIPLIER_KEY: 40,
                 WEEKDAY_COUNT_KEY: "1",
                 WEEKEND_MULTIPLIER_KEY: 1,
@@ -395,9 +398,10 @@ class PVPTask(BaseBD2Task):
                     "并确认「仅使用免费鲜血鸡尾酒」已开启，否则取消不打。"
                 ),
                 WEEK_ENABLED_KEY: (
-                    "「开」时改用下面两个时段的设定，上面的「竞技场战斗倍数」和「战斗场数」会被忽略；"
-                    "「关闭」时跟以前一样只用上面那两个。时段按游戏日算，"
-                    "每天的 08:00（北京时间）换日，所以周一 08:00 整才切到周一到周四的设定。"
+                    "默认「关闭」，这时跟以前一样只用上面的「竞技场战斗倍数」和「战斗场数」。"
+                    "打开后改用下面两个时段：倍数和场数按今天的时段决定，上面那两个会被忽略。"
+                    "时段按游戏日算，每天的 08:00（北京时间）换日，"
+                    "所以周一 08:00 整才切到周一到周四的设定。"
                 ),
                 WEEKDAY_MULTIPLIER_KEY: (
                     "周一~周四用的战斗倍数（1~40）。设定为 40 倍、1 场，"
@@ -2727,7 +2731,7 @@ class PVPTask(BaseBD2Task):
     @staticmethod
     def _week_preset(config):
         """今天的时段设定；「按星期切换倍率」没开时为 None（跟以前一样）。"""
-        if str(config.get(WEEK_ENABLED_KEY, "关闭")).strip() != "开":
+        if str(config.get(WEEK_ENABLED_KEY, WEEK_ENABLED_DEFAULT)).strip() != "开":
             return None
         return active_week_preset(config)
 

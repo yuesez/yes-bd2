@@ -40,6 +40,9 @@ from src.utils.pvp_week import (
     WEEKEND_MULTIPLIER_KEY,
     WEEKEND_PRESET_NAME,
 )
+from src.utils.pvp_week import (
+    active_preset as active_week_preset,
+)
 
 MULTIPLIER_KEY = "竞技场战斗倍数"
 COUNT_KEY = "战斗场数"
@@ -372,11 +375,28 @@ class PvpPanel(QWidget):
         self.max_button.setChecked(is_max)
         # 按星期 is on: the two period pairs replace the pair above, which dims out.
         self.week_button.setChecked(enabled)
-        self.week_button.setText(tf("按星期 {state} ▾", state=WEEK_ON if enabled else WEEK_OFF))
         weekday_multiplier = self._week_multiplier(WEEKDAY_MULTIPLIER_KEY, 1)
         weekend_multiplier = self._week_multiplier(WEEKEND_MULTIPLIER_KEY, FREE_COCKTAILS)
         weekday_count = self._week_count(WEEKDAY_MULTIPLIER_KEY, WEEKDAY_COUNT_KEY)
         weekend_count = self._week_count(WEEKEND_MULTIPLIER_KEY, WEEKEND_COUNT_KEY)
+        # 按钮上直接写出「今天的时段 + 会怎么打」：Leo 2026-10-16——只写「关闭」
+        # 时，界面上明明看得见两个时段，跑起来却毫无变化，看不出差在哪一步。
+        today = active_week_preset(self.task.config)
+        today_text = tf(
+            "{name} {multiplier}倍 × {count}场",
+            name=today.name,
+            multiplier=today.multiplier,
+            count=today.count,
+        )
+        if enabled:
+            label = tf("按星期 开 ▾ · 今天 {today}", today=today_text)
+        else:
+            label = tf(
+                "按星期 关闭 ▾ · 正在用上方 {multiplier}倍 × {count}场",
+                multiplier=multiplier,
+                count=count if not is_max else COUNT_MAX,
+            )
+        self.week_button.setText(label)
         for stepper, value in (
             (self.weekday_multiplier, weekday_multiplier),
             (self.weekend_multiplier, weekend_multiplier),

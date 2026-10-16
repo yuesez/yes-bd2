@@ -13,6 +13,7 @@ from src.utils.pvp_week import (
     WEEKDAY_MULTIPLIER_KEY,
     WEEKEND_COUNT_KEY,
     WEEKEND_MULTIPLIER_KEY,
+    active_preset,
 )
 
 WEEK_DEFAULTS = {
@@ -130,6 +131,20 @@ class PvpWeekPanelTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_switch_label_says_what_will_actually_run(self):
+        # Leo 2026-10-16: 只写「关闭」时看不出两个时段到底生效没有。
+        task = _Task()
+        panel = PvpPanel(task)
+        self.assertIn("关闭", panel.week_button.text())
+        self.assertIn("40倍", panel.week_button.text())  # 正在用上面的 40 倍
+        panel.week_button.click()
+        today = active_preset(task.config)
+        label = panel.week_button.text()
+        self.assertIn("开", label)
+        self.assertIn(today.name, label)
+        self.assertIn(f"{today.multiplier}倍", label)
+        self.assertIn(f"{today.count}场", label)
 
     def test_switch_writes_the_key_and_shows_both_periods(self):
         task = _Task()
