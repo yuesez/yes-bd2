@@ -109,6 +109,21 @@ git push
 # 改动清单：git diff --name-only upstream/main..my-changes
 ```
 
+## 网络：必须走 Clash 代理
+
+这台机器**直连 GitHub 是不通的**（实测直连 21 秒超时），必须走 Clash：
+
+```text
+http.proxy  = http://127.0.0.1:7897     ← clash-verge-rev / verge-mihomo 的混合端口
+```
+
+Clash 的 7897 同时支持 HTTP 和 SOCKS5，两种都测过能用；7890/7891 没在听。
+节点偶尔会抽风（表现为 `schannel: failed to receive handshake` 或连接超时），
+所以两个脚本的 fetch 都会重试；重试仍失败时会直接告诉你代理端口在不在听。
+
+代理挂了的时候：去 Clash Verge 换个节点，或确认它是「规则/全局」模式。
+换好再跑脚本即可，不需要改任何配置。
+
 ## 注意
 
 - `run.bat` 里的游戏路径是按这台电脑填的（`D:\Neowiz\Browndust2\Browndust2_10000002`）。

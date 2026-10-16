@@ -105,11 +105,30 @@ if ($dirty) {
 # 只有合并真正的 upstream/main 才需要先确认官方资料是新的。
 # 用 -Ref 指向别的 ref（本地分支、临时 ref）时不必联网，也不该被网络挡住。
 if ($Ref -eq "upstream/main") {
-    $fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
-    if ($fetch.Code -ne 0) {
-        Write-Host "==> 取不到官方最新（网络/代理？），不合并。" -ForegroundColor Red
-        $fetch.Output | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
-        Write-Host "  网络恢复后再跑；只是想合并本地 ref 的话用 -Ref 指定。" -ForegroundColor Yellow
+    # Clash 节点偶发抽风（SSL 握手失败）时重试几次，别一失败就放弃。
+    $fetch = $null
+    $fetchOk = $false
+    for ($try = 1; $try -le 3; $try++) {
+        $fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
+        if ($fetch.Code -eq 0) { $fetchOk = $true; break }
+        if ($try -lt 3) {
+            Write-Host "==> fetch 第 $try 次失败，$($try * 4) 秒后重试..." -ForegroundColor Yellow
+            Start-Sleep -Seconds ($try * 4)
+        }
+    }
+    if (-not $fetchOk) {
+        Write-Host "==> 取不到官方最新，不合并。" -ForegroundColor Red
+        $fetch.Output | Select-Object -Last 2 | ForEach-Object { Write-Host "  $_" }
+        $proxy = (& git -C $workspace config --get http.proxy)
+        $port = if ($proxy -match ':(\d+)\s*$') { [int]$Matches[1] } else { $null }
+        if ($port -and (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)) {
+            Write-Host "  代理 $proxy 端口在听但连不通——多半是 Clash 节点挂了，换个节点再试。" -ForegroundColor Yellow
+        } elseif ($proxy) {
+            Write-Host "  代理 $proxy 端口没在听——Clash 没开或改了端口。" -ForegroundColor Yellow
+        } else {
+            Write-Host "  git 没配代理；国内直连 GitHub 不通。" -ForegroundColor Yellow
+        }
+        Write-Host "  只是想合并本地 ref 的话用 -Ref 指定。" -ForegroundColor Yellow
         exit 1
     }
 } else {

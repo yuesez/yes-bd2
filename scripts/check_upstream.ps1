@@ -11,12 +11,16 @@
 
 fetch 不成功时脚本会挡住（exit 1）：那时候说「已经是最新版」是骗自己，
 本地这份官方资料可能已经旧了。确实要硬着头皮继续才加 -AllowStale。
+
+国内这台机器直连 GitHub 是不通的（实测直连 21s 超时），必须走 Clash 代理；
+而 Clash 节点偶尔会抽风（SSL 握手失败）。所以 fetch 默认重试 3 次。
 #>
 [CmdletBinding()]
 param(
     [switch]$Merge,
     [switch]$Push,
     [switch]$AllowStale,
+    [int]$FetchTries = 3,
     [string]$Python = ''
 )
 
@@ -27,6 +31,18 @@ function Invoke-Git {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $output = & git -C $workspace @Arguments 2>&1
     return @{ Code = $LASTEXITCODE; Output = $output }
+}
+
+function Get-ProxyState {
+    # Clash 之类代理的状态，fetch 失败时报出来，省得只看到一句 SSL 失败。
+    $proxy = (& git -C $workspace config --get http.proxy)
+    $port = $null
+    if ($proxy -match ':(\d+)\s*$') { $port = [int]$Matches[1] }
+    $listening = $false
+    if ($port) {
+        $listening = [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+    }
+    return @{ Proxy = $proxy; Port = $port; Listening = $listening }
 }
 
 function Get-CurrentBranch {
@@ -66,14 +82,38 @@ if ($dirty) {
     Write-Host "  合并前记得先处理掉。" -ForegroundColor Yellow
 }
 
-Write-Host "==> 取官方最新（fetch upstream）..."
-$fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
-$fetchOk = ($fetch.Code -eq 0)
-if ($fetchOk) {
-    $fetch.Output | Where-Object { $_ -match '\S' } | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
-} else {
-    Write-Host "  连不上官方仓库（网络/代理？）：" -ForegroundColor Red
-    $fetch.Output | ForEach-Object { Write-Host "  $_" }
+Write-Host "==> 取官方最新（fetch upstream，最多试 $FetchTries 次）..."
+$fetch = $null
+$fetchOk = $false
+for ($try = 1; $try -le [Math]::Max(1, $FetchTries); $try++) {
+    $fetch = Invoke-Git -Arguments @("fetch", "upstream", "--tags")
+    if ($fetch.Code -eq 0) {
+        $fetchOk = $true
+        if ($try -gt 1) { Write-Host "  第 $try 次成功。" -ForegroundColor Green }
+        $fetch.Output | Where-Object { $_ -match '\S' } | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
+        break
+    }
+    if ($try -lt [Math]::Max(1, $FetchTries)) {
+        # Clash 节点偶发抽风：等几秒再试，比直接放弃有用。
+        Write-Host "  第 $try 次失败，$($try * 4) 秒后重试..." -ForegroundColor Yellow
+        Start-Sleep -Seconds ($try * 4)
+    }
+}
+if (-not $fetchOk) {
+    Write-Host "  连不上官方仓库，重试 $FetchTries 次都失败。" -ForegroundColor Red
+    $fetch.Output | Select-Object -Last 2 | ForEach-Object { Write-Host "  $_" }
+    $state = Get-ProxyState
+    if ($state.Port) {
+        if ($state.Listening) {
+            Write-Host "  代理 $($state.Proxy) 端口在听，但连不通——多半是 Clash 节点挂了，" -ForegroundColor Yellow
+            Write-Host "  去 Clash Verge 换个节点，或确认它是「规则/全局」模式而不是直连。" -ForegroundColor Yellow
+        } else {
+            Write-Host "  代理 $($state.Proxy) 端口没在听——Clash 没开或改过端口。" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  git 没配代理；国内直连 GitHub 是不通的（实测 21s 超时）。" -ForegroundColor Yellow
+        Write-Host "  试试：git config --global http.proxy http://127.0.0.1:7897" -ForegroundColor Yellow
+    }
 }
 
 # 本次结果的「新鲜度」：从 FETCH_HEAD 的写入时间看官方资料有多旧。
