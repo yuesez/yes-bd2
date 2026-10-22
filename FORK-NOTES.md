@@ -109,6 +109,26 @@ git push
 # 改动清单：git diff --name-only upstream/main..my-changes
 ```
 
+### ⚠️ 安装版落后太多时，不能只拷文件
+
+2026-10-22 实测：源码版合到官方最新后，安装版还是 `v0.1.42`（落后 83 个提交）。
+把新的 `PVPTask.py` 单独拷过去会直接崩：
+
+```
+ImportError: cannot import name 'FIELD_FOLLOWERS_KEY' from 'src.tasks.BaseBD2Task'
+```
+
+因为新版 `PVPTask.py` 依赖官方同时改的 `BaseBD2Task`、`wait_limits`、`pvp_dialog` 等
+一整套文件。**只同步「我改的那几个文件」只在两边版本接近时可行**；版本差得远时，
+要么让启动器把安装版整个更新到最新再同步，要么直接用源码版（`run.bat`）。
+
+判断方法：先看两边的版本差多少
+
+```powershell
+git rev-list --count HEAD  # 源码版
+# 安装版看 working\src\config.py 里的 version
+```
+
 ## 网络：访问 GitHub 需要走代理
 
 这台机器**直连 GitHub 是不通的**，git 已配好代理（`http.proxy`）。
