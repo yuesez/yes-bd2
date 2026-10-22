@@ -43,9 +43,11 @@ class SkipBrokenCardTest(unittest.TestCase):
         use_actions=None,
         home_ok=True,
         recovered=None,
+        unfinished=(),
     ):
         events = []
         warnings = []
+        self.infos = []
         home = (
             NavigationResult(True, ScreenState.HOME)
             if home_ok
@@ -60,7 +62,7 @@ class SkipBrokenCardTest(unittest.TestCase):
             task = SimpleNamespace(
                 config={"卡带单步重试次数": 2},
                 log_warning=lambda message, *_a, **_k: warnings.append(message),
-                info_set=lambda *_args: None,
+                info_set=lambda *args: self.infos.append(args),
             )
             if recovered is not None:
                 # A real task: the general way home is tried after a skip.
@@ -89,9 +91,13 @@ class SkipBrokenCardTest(unittest.TestCase):
                 open_story_quick_switcher_from_sandbox=lambda **_kwargs: NavigationResult(
                     True, ScreenState.CARD_MENU
                 ),
-                inspect_collection_card_completion=lambda card_id: CollectionCardSelectionResult(
-                    CollectionCardSelectionOutcome.VISUALLY_COMPLETE,
-                    NavigationResult(True, ScreenState.CARD_MENU),
+                inspect_collection_card_completion=lambda card_id: (
+                    NavigationResult(False, ScreenState.CARD_MENU, "未同时确认吸取与压制完成")
+                    if card_id in unfinished
+                    else CollectionCardSelectionResult(
+                        CollectionCardSelectionOutcome.VISUALLY_COMPLETE,
+                        NavigationResult(True, ScreenState.CARD_MENU),
+                    )
                 ),
                 return_home=lambda: events.append(("home",)) or home,
             )
@@ -130,8 +136,14 @@ class SkipBrokenCardTest(unittest.TestCase):
         self.assertFalse(state.card_verified("Q_ep5"))
         self.assertFalse(state.weekly_collection_complete)
         self.assertTrue(result.message.startswith("活动卡5这次跳过，没有完成"))
-        self.assertIn("「跑图章节」取消勾选", result.message)
+        # Leo 2026-10-20: no 「取消勾选」 hint in the skip message.
+        self.assertNotIn("取消勾选", result.message)
         self.assertTrue(any("活动卡5进不去" in line for line in warnings))
+        # The summary says why (player report 2026-10-17 said only 「这次跳过」).
+        self.assertIn("（原因：活动卡5进不去", result.message)
+        # 「停在」 names the skip, not the next card's step.
+        stage = [value for key, value in self.infos if key == "当前阶段"][-1]
+        self.assertEqual("地图采集：活动卡5跳过，没有完成", stage)
 
     def test_every_missing_card_is_named_once(self):
         result, _events, _warnings, _state = self._run(
@@ -139,6 +151,19 @@ class SkipBrokenCardTest(unittest.TestCase):
         )
         self.assertFalse(result.success)
         self.assertTrue(result.message.startswith("第1章、第2章这次跳过"))
+
+    def test_cards_skipped_for_one_reason_share_it(self):
+        # Player 2026-10-19: nine chapters skipped; the report cut off the
+        # reasons after 第3章, so 第5–11章's were never seen.
+        result, _events, _warnings, _state = self._run(
+            ("Q_sp2", "Q_sp3", "Q_sp5", "Q_sp6", "Q_sp7"),
+            select=lambda card_id, **_k: NOT_FOUND,
+        )
+        self.assertTrue(result.message.startswith("第2章、第3章、第5章至第7章这次跳过"))
+        self.assertIn("（原因：第2章、第3章、第5章至第7章都进不去", result.message)
+        self.assertEqual(1, result.message.count("进不去"))
+        stage = [value for key, value in self.infos if key == "当前阶段"][-1]
+        self.assertEqual("地图采集：第2章、第3章、第5章至第7章跳过，没有完成", stage)
 
     def test_a_route_that_breaks_twice_skips_the_card(self):
         def advance(card_id, current, target):
@@ -149,6 +174,7 @@ class SkipBrokenCardTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertIn("第1章", result.message)
+        self.assertIn("走不过去", result.message)
         # The maps really done stay recorded; the card is not finished.
         self.assertEqual({"main_area", "battle_area_1"}, state.completed_targets("Q_sp1"))
         self.assertFalse(state.card_verified("Q_sp1"))
@@ -209,9 +235,9 @@ class SkipBrokenCardTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.message.startswith("第1章这次跳过"))
 
-    def test_a_map_left_undecided_today_skips_only_that_card(self):
-        # Audit #2: on bright ground an unconfirmed press blocked the map and
-        # stopped the run on every retry until 08:00.
+    def test_a_map_left_undecided_does_not_stop_the_card(self):
+        # Leo 2026-10-20: the card's other maps still run, and no record
+        # keeps a map from being pressed for the day.
         def use_actions(progress, events, actions, *, card_id, map_role):
             events.append(("collect", card_id, map_role.value))
             if card_id == "Q_sp1" and map_role is CollectionMapRole.BATTLE_AREA_1:
@@ -221,17 +247,19 @@ class SkipBrokenCardTest(unittest.TestCase):
             _seed_action_records(progress, card_id, map_role.value)
             return SkillExecutionResult(True)
 
-        result, events, _warnings, state = self._run(("Q_sp1", "Q_sp2"), use_actions=use_actions)
+        result, events, _warnings, state = self._run(
+            ("Q_sp1", "Q_sp2"), use_actions=use_actions, unfinished=("Q_sp1",)
+        )
 
         self.assertFalse(result.success)
         self.assertIn("第1章", result.message)
-        self.assertNotIn(("collect", "Q_sp1", "battle_area_2"), events)
-        self.assertEqual({"main_area"}, state.completed_targets("Q_sp1"))
+        self.assertNotIn("今天不再按这张图", result.message)
+        self.assertIn(("collect", "Q_sp1", "battle_area_2"), events)
         self.assertTrue(state.card_verified("Q_sp2"))
 
-    def test_a_skill_failure_skips_the_card_and_names_where(self):
-        # Leo 2026-10-12: a player's weekly run stopped on 第5章 主城区 (吸收
-        # not confirmed).  Skip that card, run the next, and say where.
+    def test_an_unconfirmed_map_goes_on_and_the_card_is_retried_once(self):
+        # Leo 2026-10-20 「沒記錄到 那也是要跑下一章吧」「一個卡帶就三張地圖而以
+        # 不要讓工具判斷錯誤導致沒有完成」.
         def use_actions(progress, events, actions, *, card_id, map_role):
             events.append(("collect", card_id, map_role.value))
             if card_id == "Q_sp1":
@@ -239,19 +267,37 @@ class SkipBrokenCardTest(unittest.TestCase):
             _seed_action_records(progress, card_id, map_role.value)
             return SkillExecutionResult(True)
 
-        result, events, warnings, state = self._run(("Q_sp1", "Q_sp2"), use_actions=use_actions)
+        result, events, warnings, state = self._run(
+            ("Q_sp1", "Q_sp2"), use_actions=use_actions, unfinished=("Q_sp1",)
+        )
 
-        self.assertIn(("home",), events)
-        self.assertNotIn(("collect", "Q_sp1", "battle_area_1"), events)
+        collected = [event[2] for event in events if event[:2] == ("collect", "Q_sp1")]
+        # Every map, twice: the first pass and the one retry.
+        self.assertEqual(["main_area", "battle_area_1", "battle_area_2"] * 2, collected)
+        self.assertEqual(2, events.count(("select", "Q_sp1")))
         self.assertTrue(state.card_verified("Q_sp2"))
         self.assertFalse(state.card_verified("Q_sp1"))
         self.assertFalse(result.success)
         self.assertTrue(result.message.startswith("第1章"), result.message)
         self.assertIn(CollectionMapRole.MAIN_AREA.label, result.message)
         self.assertIn("技能操作失败：未确认采集技能栏", result.message)
-        self.assertIn("下次运行再跑", result.message)
+        self.assertIn("其余地图照跑", result.message)
         self.assertNotIn("取消勾选", result.message)
-        self.assertTrue(any("先跳过，继续下一张" in line for line in warnings))
+        self.assertTrue(any("继续下一张图" in line for line in warnings))
+
+    def test_an_unconfirmed_press_the_game_shows_done_is_done(self):
+        def use_actions(progress, events, actions, *, card_id, map_role):
+            events.append(("collect", card_id, map_role.value))
+            if card_id == "Q_sp1" and map_role is CollectionMapRole.MAIN_AREA:
+                return SkillExecutionResult(False, message="吸收执行证据不一致")
+            _seed_action_records(progress, card_id, map_role.value)
+            return SkillExecutionResult(True)
+
+        result, events, _warnings, state = self._run(("Q_sp1",), use_actions=use_actions)
+
+        self.assertTrue(result.success, result.message)
+        self.assertTrue(state.card_verified("Q_sp1"))
+        self.assertEqual(1, events.count(("select", "Q_sp1")))
 
     def test_used_up_skills_still_end_the_run(self):
         def use_actions(progress, events, actions, *, card_id, map_role):

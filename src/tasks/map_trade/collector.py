@@ -8,13 +8,17 @@ from ok.task.exceptions import FinishedException, TaskDisabledException
 
 from src.tasks.map_trade import account_check
 from src.tasks.map_trade.action_icons import ActionIconDetector
-from src.tasks.map_trade.card_status import CollectionCardSelectionOutcome
+from src.tasks.map_trade.card_status import (
+    CollectionCardSelectionOutcome,
+    CollectionCardSelectionResult,
+)
 from src.tasks.map_trade.collector_constants import (
     ABSORB_ACTION,
     BATTLE_ACTIONS,
     SKILL_FAILURE_EVIDENCE_LIMIT,
     SKILL_FAILURE_TEXT_LIMIT,
     UNSUPPORTED_COLLECTION_CARD_NUMBERS,
+    SUPPRESS_ACTION,
     SearchCountdownSession,
     SkillExecutionResult,
 )
@@ -34,6 +38,12 @@ from src.utils.press_confirm import SLOW_PC_GRACE_SECONDS, wait_for
 
 # "卡带单步重试次数"未配置时的默认值。
 CARD_RETRY_DEFAULT = 2
+# A map whose press was cut by a field battle is done again after running
+# away, this many times at most, 压制 first to clear the monsters.
+BATTLE_REDOS_MAX = 2
+AFTER_ESCAPE_ACTIONS = (SUPPRESS_ACTION,) + tuple(
+    action for action in BATTLE_ACTIONS if action is not SUPPRESS_ACTION
+)
 
 
 def chapter_filter(text) -> set[int | str] | None:
@@ -98,6 +108,9 @@ class Collector(SkillExecutionMixin):
         # 2026-10-12: skip the card, but the report must say where).
         self._skill_skips: dict[str, str] = {}
         self._unconfirmed_cards: set[str] = set()
+        # card_id -> why a card was skipped (player report 2026-10-17: the
+        # summary said only 「这次跳过」 and the stage left over from before).
+        self._skip_reasons: dict[str, str] = {}
         try:
             return self._with_skipped_cards(self._run_collection())
         except RuntimeError as exc:
@@ -114,7 +127,10 @@ class Collector(SkillExecutionMixin):
 
     def _run_collection(self) -> CollectionResult:
         state = self.progress.load()
-        if state.depleted_today or state.daily_submaps >= self.progress.limit_of("吸收"):
+        # Only the game's count says the day is used up (a player 2026-10-20:
+        # 18/21 absorbs, the tool said used up and 开始跑图 did nothing).
+        self.progress.forget_unproven_depletion()
+        if self.progress.game_used_up("吸收"):
             return CollectionResult(True, depleted=True, message="今日采集技能额度已用尽")
         # GitHub issue #4: records that call cards finished while the game
         # shows them untouched belong to another account; stop, press nothing.
@@ -139,7 +155,8 @@ class Collector(SkillExecutionMixin):
             1, int(self.task.config.get("卡带单步重试次数", CARD_RETRY_DEFAULT))
         )
         allowed = chapter_filter(self.task.config.get("跑图章节", ""))
-        for card in COLLECTABLE_CARDS:
+        self._badges_unfinished: set[str] = set()
+        for card in self._cards_with_one_retry():
             if allowed is not None and card.filter_key not in allowed:
                 continue
             if card.number in UNSUPPORTED_COLLECTION_CARD_NUMBERS:
@@ -152,22 +169,12 @@ class Collector(SkillExecutionMixin):
             state = self.progress.state
             completed = state.completed_targets(card.card_id)
             if len(completed) >= len(card.targets):
-                if state.card_verified(card.card_id):
-                    continue
-                verified = self.navigator.inspect_collection_card_completion(card.card_id)
-                if self._badges_cut_off(verified):
-                    continue
-                if verified.success:
+                # Three maps done this week = the card is done; its badges are
+                # not read (Leo 2026-10-21 「假設我第五章 安全區 戰鬥1 戰鬥2 都
+                # 進行過了 那麼這張就不再跑」, 「第六章確認跑過一遍就算完成」:
+                # a player's 跑图 kept walking cards it had finished).
+                if not state.card_verified(card.card_id):
                     self.progress.mark_card_verified(card.card_id)
-                    continue
-                # Something is still left, but which map is not known: the
-                # maps stay recorded (Leo 2026-10-06) and the run goes on.
-                self.task.log_warning(
-                    f"地图采集：{card.card_id}三张地图已有进度，但卡带图标仍未完成"
-                    f"（{verified.message or '-'}），先跑下一张。"
-                )
-                self.progress.keep_unverified_card(card.card_id)
-                self._unfinished_cards.append(card.card_id)
                 continue
 
             if card_limit and cards_this_run >= card_limit:
@@ -222,7 +229,12 @@ class Collector(SkillExecutionMixin):
             # the safe restart: hunting ground -> the town -> start over.
             here = self.navigator.current_collection_target(card)
             keys = [target.key for target in card.targets]
-            order = [target for target in card.targets if target.key not in completed]
+            # The whole route every time, whatever this PC recorded: a map
+            # done already shows grey icons and is passed through (Leo
+            # 2026-10-20 「以遊戲為準 不要讓工具紀錄的狀況影響跑圖」; ch14 went
+            # town -> 中央回廊 by the teleport map because 左侧回廊 was
+            # recorded, and 中央回廊 has no circle).
+            order = list(card.targets)
             if here == keys[-1]:
                 if card.card_id in LAST_MAP_THEN_TOWN_CARD_IDS:
                     # Last map first, then the town and the rest forward.
@@ -255,6 +267,10 @@ class Collector(SkillExecutionMixin):
             restarted = False
             search_confirmed = False
             before_search: list[str] = []
+            # Maps finished in this pass: a restart walks through them again
+            # without pressing anything there.
+            done_here: set[str] = set()
+            battled_here: dict[str, int] = {}
             index = 0
             while index < len(order):
                 target = order[index]
@@ -286,10 +302,13 @@ class Collector(SkillExecutionMixin):
                             return stopped
                         break
                     current = card.targets[0]
-                    order = [item for item in card.targets if item.key not in completed]
+                    order = list(card.targets)
                     index = 0
                     continue
                 current = target
+                if target.key in done_here:
+                    index += 1
+                    continue
                 used_up = self._absorb_used_up(card_id=card.card_id, map_role=role)
                 if used_up is not None:
                     return self._skill_failure(card.card_id, role.label, used_up, completed_this_run)
@@ -311,26 +330,40 @@ class Collector(SkillExecutionMixin):
                 actions = (
                     (ABSORB_ACTION,) if role is CollectionMapRole.MAIN_AREA else BATTLE_ACTIONS
                 )
+                if target.key in battled_here and role is not CollectionMapRole.MAIN_AREA:
+                    # Leo 2026-10-22 「逃跑完 就優先按壓制 再按其他的」「先把怪清掉」.
+                    actions = AFTER_ESCAPE_ACTIONS
                 result = self._use_actions(actions, card_id=card.card_id, map_role=role)
                 if not result.completed:
-                    if not result.depleted and self._map_blocked_today(card.card_id, role):
-                        # Audit #2: a press here that cannot be settled today
-                        # holds back only this card, not the rest of the run.
-                        self._record_skill_failure(card.card_id, role.label, result)
-                        stopped = self._skip_card(
-                            card,
-                            f"{target.title}上次按的技能今天确认不了，今天不再按这张图",
-                            completed_this_run,
-                        )
+                    # A monster touched the character (live 2K 2026-10-22,
+                    # 第14章 战斗区域2): run away and do this map again (Leo
+                    # 「逃跑完一樣繼續該圖的跑圖流程」), twice at most.
+                    left = self._leave_battle(card, role)
+                    if left == "left" and battled_here.get(target.key, 0) < BATTLE_REDOS_MAX:
+                        battled_here[target.key] = battled_here.get(target.key, 0) + 1
+                        continue
+                    if left not in ("left", "none"):
+                        stopped = self._skip_card(card, f"{role.label}撞到怪进了战斗，{left}", completed_this_run)
                         if stopped is not None:
                             return stopped
                         break
-                    stopped = self._skip_after_skill_failure(
-                        card, role.label, result, completed_this_run
-                    )
-                    if stopped is not None:
-                        return stopped
-                    break
+                if not result.completed:
+                    if result.depleted:
+                        return self._skill_failure(
+                            card.card_id, role.label, result, completed_this_run
+                        )
+                    # One map's press that cannot be confirmed no longer
+                    # drops the rest of the card: it is reported and the
+                    # route goes on to the next map (Leo 2026-10-20 「沒記錄到
+                    # 那也是要跑下一章吧」).  The card's badges decide at its end.
+                    self._note_map_problem(card, role.label, result)
+                    index += 1
+                    continue
+                done_here.add(target.key)
+                if target.key in completed:
+                    # Recorded before, passed through again on the route.
+                    index += 1
+                    continue
                 committed = self.progress.mark_target(card.card_id, target.key)
                 if not committed:
                     return CollectionResult(
@@ -378,12 +411,29 @@ class Collector(SkillExecutionMixin):
                     completed_submaps=completed_this_run,
                     message=f"{card.card_id}完成后无法打开快速切换页：{reopened.message}",
                 )
-            verified = self.navigator.inspect_collection_card_completion(card.card_id)
-            if self._badges_cut_off(verified):
+            maps_done = len(completed) >= len(card.targets)
+            verified = self._card_done_check(card, completed)
+            if card.card_id in self._skill_skips:
+                if verified.success or maps_done:
+                    # The card is done: the unconfirmed press took.
+                    self._skill_skips.pop(card.card_id)
+                    self._unconfirmed_cards.discard(card.card_id)
+                elif card not in self._skipped_cards:
+                    self._skipped_cards.append(card)
+            if not maps_done and self._badges_cut_off(verified):
                 cards_this_run += 1
                 continue
             cards_this_run += 1
-            if not verified.success:
+            if maps_done:
+                # Every map done = the card is done, whatever its badges read
+                # (Leo 2026-10-21, see the check before the card).
+                if not verified.success:
+                    self.task.log_warning(
+                        f"地图采集：{card.label}三张地图都跑过，记为本周完成"
+                        f"（卡带图标读成未完成：{verified.message or '-'}）。"
+                    )
+                self.progress.mark_card_verified(card.card_id)
+            elif not verified.success:
                 # Leo 2026-10-05: one card left unfinished stopped the whole
                 # run.  The card is collected again on the next run; go on.
                 # Leo 2026-10-06: maps that were done stay recorded; only the
@@ -402,7 +452,13 @@ class Collector(SkillExecutionMixin):
                     self.progress.reset_card(card.card_id, redo)
                 else:
                     self.progress.keep_unverified_card(card.card_id)
-                self._unfinished_cards.append(card.card_id)
+                if card.card_id not in self._unfinished_cards:
+                    self._unfinished_cards.append(card.card_id)
+                self._badges_unfinished.add(card.card_id)
+            elif len(completed) < len(card.targets):
+                # The game's badges show it done, a map's press only went
+                # unconfirmed here: the game decides.
+                self.progress.mark_card_complete_from_badge(card.card_id)
             else:
                 self.progress.mark_card_verified(card.card_id)
 
@@ -457,6 +513,10 @@ class Collector(SkillExecutionMixin):
                 + (f"；末图有{pending}条动作次数待后续明亮帧对账" if pending else "")
             ),
         )
+
+    def _card_done_check(self, card, completed) -> CollectionCardSelectionResult:
+        """The game's badges for the card (第6章 by its own badge rule)."""
+        return self.navigator.inspect_collection_card_completion(card.card_id)
 
     def _badges_cut_off(self, verified) -> bool:
         """The card's badge row is cut off at the quick bar's edge.
@@ -532,6 +592,41 @@ class Collector(SkillExecutionMixin):
         if keeper is not None:
             keeper.restore(**kwargs)
 
+    def _cards_with_one_retry(self):
+        """Every card in order; a card left unfinished by this run (a map
+        not confirmed, a failed move, badges still open) is run once more
+        straight away, judged again by the game's screen (Leo 2026-10-20
+        「一個卡帶就三張地圖而以 不要讓工具判斷錯誤導致沒有完成」).  A card
+        that cannot be entered at all is not retried."""
+        retried: set[str] = set()
+        for card in COLLECTABLE_CARDS:
+            yield card
+            if card.card_id in retried or not self._card_left_unfinished(card):
+                continue
+            retried.add(card.card_id)
+            self._status("采集进度", f"{card.card_id}没有完成，照游戏画面再跑一次")
+            self.task.log_warning(f"地图采集：{card.label}没有完成，再跑一次。")
+            self._forget_card_problems(card)
+            yield card
+
+    def _card_left_unfinished(self, card) -> bool:
+        if card.card_id in getattr(self, "_badges_unfinished", set()):
+            return True
+        if card not in self._skipped_cards:
+            return False
+        reason = self._skip_reasons.get(card.card_id, "")
+        return not reason.startswith("进不去")
+
+    def _forget_card_problems(self, card) -> None:
+        """The retry's own outcome is what the report tells."""
+        self._skipped_cards = [item for item in self._skipped_cards if item.card_id != card.card_id]
+        self._skill_skips.pop(card.card_id, None)
+        self._skip_reasons.pop(card.card_id, None)
+        self._unconfirmed_cards.discard(card.card_id)
+        self._badges_unfinished.discard(card.card_id)
+        if card.card_id in self._unfinished_cards:
+            self._unfinished_cards.remove(card.card_id)
+
     def _go_to_collection_target(self, card, current, target):
         """None when already there, else the navigation result."""
         if current is not None and current.key == target.key:
@@ -554,6 +649,7 @@ class Collector(SkillExecutionMixin):
         recorded for it and it stays in 跑图章节.
         None = go on; a result = stop, home was not reached."""
         self._skipped_cards.append(card)
+        self._skip_reasons.setdefault(card.card_id, reason)
         self.task.log_warning(f"地图采集：{card.label}{reason}，先跳过，继续下一张。")
         # A skipped card keeps the collection group too when a later card
         # follows (Leo 2026-10-15 「一張卡帶跑完都會把技能欄切成錯的 下張圖又
@@ -612,6 +708,29 @@ class Collector(SkillExecutionMixin):
             self._unconfirmed_cards.add(card.card_id)
         return self._skip_card(card, problem, completed_this_run)
 
+    def _leave_battle(self, card, role) -> str:
+        """A field battle on screen after a press: see BaseBD2Task.leave_field_battle."""
+        leave = getattr(self.task, "leave_field_battle", None)
+        if not callable(leave):
+            return "none"
+        left = leave(f"地图采集：{card.label}{role.label}")
+        if left == "left":
+            self._status("采集进度", f"{card.card_id} {role.label}：离开战斗，重做这张图")
+        return left
+
+    def _note_map_problem(self, card, stage: str, result: SkillExecutionResult) -> None:
+        """A map whose press could not be confirmed: kept for the report,
+        the card's route goes on."""
+        self._record_skill_failure(card.card_id, stage, result)
+        problem = f"{stage}技能操作失败" + (f"：{result.message}" if result.message else "")
+        if card.card_id in self._skill_skips:
+            self._skill_skips[card.card_id] += f"；{problem}"
+        else:
+            self._skill_skips[card.card_id] = problem
+        if self._press_probably_taken(result):
+            self._unconfirmed_cards.add(card.card_id)
+        self.task.log_warning(f"地图采集：{card.label}{problem}，继续下一张图。")
+
     @staticmethod
     def _press_probably_taken(result: SkillExecutionResult) -> bool:
         """The icon went grey after the press, only its count or toast could
@@ -633,16 +752,37 @@ class Collector(SkillExecutionMixin):
             problem = self._skill_skips[card.card_id]
             if card.card_id in unconfirmed:
                 problem = problem.replace("技能操作失败", "技能可能已按上但没能确认")
-            notes.append(f"{card.label}{problem}，这张先跳过，下次运行再跑")
+            notes.append(f"{card.label}{problem}，其余地图照跑，没完成的下次运行再补")
         missing = [card for card in cards if card.card_id not in self._skill_skips]
         if missing:
-            names = "、".join(card.label for card in missing)
+            names = _card_names(missing)
+            reasons = getattr(self, "_skip_reasons", {})
+            # Cards that stopped for the same reason share one entry, so a
+            # long run of skips keeps every reason inside the report's line
+            # (player 2026-10-19: nine chapters skipped, the reasons of
+            # 第5–11章 were cut off after 第3章's).
+            grouped: dict[str, list] = {}
+            for card in missing:
+                if reasons.get(card.card_id):
+                    grouped.setdefault(reasons[card.card_id], []).append(card)
+            why = "；".join(
+                f"{group[0].label}{reason}"
+                if len(group) == 1
+                else f"{_card_names(group)}都{reason}"
+                for reason, group in grouped.items()
+            )
             notes.append(
-                f"{names}这次跳过，没有完成；没有这张卡带或不想跑的话，"
-                "可在「跑图章节」取消勾选（跑图页点一下这张卡带）"
+                f"{names}这次跳过，没有完成"
+                + (f"（原因：{why}）" if why else "")
             )
         note = "；".join(notes)
         self.task.log_warning(f"地图采集：{note}。")
+        # The summary's 「停在」 is 当前阶段: without this it kept the step of
+        # the card after the skip (Leo 4K 2026-10-17 「寻找快速切换按钮」).
+        info_set = getattr(self.task, "info_set", None)
+        if callable(info_set):
+            skipped = _card_names(cards)
+            info_set("当前阶段", f"地图采集：{skipped}跳过，没有完成")
         # Only presses that surely did not happen fail the run; one that
         # most likely took (icon greyed) is reported, not failed.
         failed = any(card.card_id not in unconfirmed for card in cards)
@@ -650,15 +790,6 @@ class Collector(SkillExecutionMixin):
             result,
             success=result.success and not failed,
             message=f"{note}；{result.message}" if result.message else note,
-        )
-
-    def _map_blocked_today(self, card_id: str, role: CollectionMapRole) -> bool:
-        """A press on this map is left undecided for the day (audit #2): it
-        is never pressed again before 08:00."""
-        return any(
-            str((self.progress.get_action_record(card_id, role, action.name) or {}).get("state"))
-            == CollectionActionState.BLOCKED.value
-            for action in BATTLE_ACTIONS
         )
 
     def _skill_failure(
@@ -723,3 +854,29 @@ class Collector(SkillExecutionMixin):
             self.task.info_set(key, value)
         except AttributeError:
             pass
+
+
+def _card_names(cards) -> str:
+    """「第3章、第5章至第11章」: chapters in a row are named as a range."""
+    names: list[str] = []
+    run: list = []
+
+    def flush() -> None:
+        if len(run) > 2:
+            names.append(f"{run[0].label}至{run[-1].label}")
+        else:
+            names.extend(card.label for card in run)
+        run.clear()
+
+    for card in cards:
+        if (
+            run
+            and card.category == run[-1].category
+            and card.number == run[-1].number + 1
+        ):
+            run.append(card)
+            continue
+        flush()
+        run.append(card)
+    flush()
+    return "、".join(names)

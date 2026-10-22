@@ -12,9 +12,13 @@ from src.tasks.map_trade.models import TemplateSpec
 from src.tasks.quick_hunt import QuickHuntConfigMixin
 from src.tasks.recovery import recover_to_home
 from src.tasks.task_vision_mixin import REFERENCE_HEIGHT, REFERENCE_WIDTH, TaskVisionMixin
-from src.utils.home_confirmation import HOME_DIMMED_P95_THRESHOLD_DEFAULT
+from src.utils.home_confirmation import (
+    HOME_ANNOUNCEMENT_CLEAR_RELATIVE_POINT,
+    HOME_DIMMED_P95_THRESHOLD_DEFAULT,
+)
 from src.utils.ocr_utils import normalize_ocr_text
-from src.utils.wait_limits import LOADING_MAX_SECONDS, is_loading_dark, load_wait
+from src.utils.press_confirm import wait_for
+from src.utils.wait_limits import LOADING_MAX_SECONDS, is_loading_dark, load_wait, scene_at_press
 
 GUILD_TEMPLATE = TemplateSpec(
     name="guild",
@@ -90,6 +94,9 @@ BUSINESS_COLLECT_KEYWORDS = [
 GUILD_SIGN_IN_ENTRY_REFERENCE_POINT = (370, 155)
 GUILD_SIGN_IN_SUCCESS_ACKNOWLEDGE_REFERENCE_POINT = (450, 650)
 BACK_BUTTON_REFERENCE_POINT = (100, 50)
+GUILD_BACK_ATTEMPTS = 4
+GUILD_BACK_LOOK_SECONDS = 2.0
+GUILD_BACK_LAST_LOOK_SECONDS = 4.0
 MY_HOME_ENTRY_REFERENCE_POINT = (166, 158)
 MY_HOME_TITLE_RELATIVE_ROI = (0.11, 0.01, 0.25, 0.10)
 MY_HOME_TITLE_OCR_RETRY_INTERVAL = 0.4
@@ -142,6 +149,24 @@ GUILD_ENTRY_LONG_PRESS_SECONDS = 0.15
 # A sub-step that clicked nothing on a confirmed home (no guild entry) is
 # skipped, not failed.
 STEP_SKIPPED = "skipped"
+# The guild entry on home carries a red 「!」 at its top-right corner until the
+# day's sign-in is done (guild.png / MainBotmUnionAcGE.png; the *finished*
+# templates have none).  Player 2026-10-21 (v0.2.3/v0.2.4): with many popups
+# on entry the guild was never entered yet the step said done, so a 「!」 still
+# on home after the visit sends the step in once more.  Box share of the corner, and
+# the share of red pixels there that counts as the mark (6% in guild.png,
+# 25% in MainBotmUnionAcGE.png, 0 in both finished templates).
+GUILD_MARK_CORNER = (0.55, 0.0, 1.0, 0.45)
+GUILD_MARK_MIN_RED_SHARE = 0.03
+# The 「!」 can clear a moment after home shows again.
+GUILD_MARK_CLEAR_SECONDS = 3.0
+# The sign-in reward panel can show a moment after the guild page: a marked
+# entry stays on the page this long for it before going back.
+GUILD_TOAST_LINGER_SECONDS = 3.0
+# Sign-in words over a screen that is not the guild page belong to another
+# popup (event login rewards say the same): tapped away, never taken as the
+# sign-in, at most this often.
+GUILD_POPUP_TAP_SECONDS = 1.5
 
 
 class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
@@ -162,6 +187,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         "公会判断",
         "公会入口",
         "公会入口模板",
+        "公会入口红点",
         "公会入口阈值",
         "公会签到 loading 状态",
         "公会签到_loading_appear",
@@ -226,6 +252,9 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         "my_home": "小屋页面检测分数",
         "business_collect 关键字": "一键收菜关键字命中",
     }
+    # Per sub-step: why it failed, and whether home was lost after it was done.
+    _step_why = ""
+    _home_lost_after_done = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -272,6 +301,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             return True
 
         self.info_set("状态", "公会、小屋、酒馆启动。")
+        self._why = ""
         steps = [
             ("公会签到", "执行公会签到", self.run_guild_sign_in),
             ("小屋签到", "执行小屋签到", self.run_my_home_sign_in),
@@ -282,6 +312,12 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         success = []
         failed = []
         skipped = []
+        # Why each failed step failed, for the 问题摘要: without it the
+        # summary took the run's last log line, which belonged to a later
+        # step (player 2026-10-17: 「失败：一键收菜：关闭经营管理弹窗」 while
+        # 一键收菜 was done and 公会签到 had failed).
+        reasons = {}
+        stuck_after = ""
         stop_remaining = False
         for name, config_key, func in steps:
             if name not in enabled:
@@ -293,6 +329,8 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
 
             self.info_set("当前任务", name)
             self.log_info(f"开始日常子任务：{name}")
+            self._step_why = ""
+            self._home_lost_after_done = False
             result = self._run_step(name, func)
             # A failed step is tried once more from home (player 2026-10-12,
             # v0.1.24: right after 08:00 the game's announcement board
@@ -301,6 +339,8 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             if not result:
                 if self._wait_for_home_confirmation(f"{name}失败后主页确认", timeout=3.0):
                     self.log_info(f"{name}：没成功，已回到主页，再试一次。")
+                    self._step_why = ""
+                    self._home_lost_after_done = False
                     result = self._run_step(name, func)
                 else:
                     home_lost = True
@@ -308,8 +348,13 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
                 skipped.append(name)
             elif result:
                 success.append(name)
+                if self._home_lost_after_done:
+                    stop_remaining = True
+                    stuck_after = name
+                    self.log_info(f"{name} 完成后未能确认回到主页，停止剩余子任务。")
             else:
                 failed.append(name)
+                reasons[name] = self._step_why or "原因没有记录到，请看摘要里的游戏画面"
                 # The steps are independent: only a game that is not back
                 # on home stops the rest (finding 24).
                 if name == enabled[-1]:
@@ -326,11 +371,18 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         self.info_set("完成", str(success))
         self.info_set("失败", str(failed))
         self.info_set("跳过", str(skipped))
-        self.info_set("状态", "公会、小屋、酒馆结束。")
+        whys = [f"{name}：{reasons[name]}" for name in failed]
+        if stuck_after:
+            whys.append(f"{stuck_after}做完后没能回到主页，后面的没做")
+        if whys:
+            self._why = "；".join(whys)
+            self.info_set("状态", f"公会、小屋、酒馆失败：{self._why}。")
+        else:
+            self.info_set("状态", "公会、小屋、酒馆结束。")
         self.log_completion(
             f"公会、小屋、酒馆结束：完成={success}, 失败={failed}, 跳过={skipped}"
         )
-        return not failed
+        return not whys
 
     def _run_step(self, name: str, func):
         try:
@@ -339,7 +391,28 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
             raise
         except Exception as exc:
             self.log_error(f"日常子任务失败：{name}", exc)
-            return False
+            return self._step_failed(f"程序出错（{exc}）")
+
+    def _step_failed(self, why: str) -> bool:
+        """Note why the running sub-step failed; the first reason wins."""
+        if not getattr(self, "_step_why", ""):
+            self._step_why = why
+        return False
+
+    def _home_after_done(self, name: str) -> bool:
+        """The step's work is done but the back press did not show home.
+
+        A step is judged on its own work (2K 桌面分身 2026-10-16 and a player
+        2026-10-17: the sign-in had worked, then an event popup over home
+        failed the home check and 公会签到 was reported failed).  Home is
+        reached through the recovery flow, which closes popups; only when
+        that fails too do the remaining steps stop.
+        """
+        self.log_info(f"{name}：已完成，但回主页时没认出主页（可能被弹窗挡住），走回主页流程。")
+        if not recover_to_home(self):
+            self._home_lost_after_done = True
+            self.log_info(f"{name}：已完成，但没能回到主页。")
+        return True
 
     def _home_after_failed_step(self, name: str) -> bool:
         """True once home is confirmed again after a failed sub-step.
@@ -370,7 +443,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
 
     def run_guild_sign_in(self) -> bool | str:
         if not self._wait_for_home_confirmation("公会签到入口前主页确认"):
-            return False
+            return self._step_failed("开始前不在主页（可能被弹窗挡住）")
 
         guild_ready, frame = self._find_guild_entry()
         if not guild_ready:
@@ -380,8 +453,63 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
                 self.log_info("公会签到：未找到公会入口（可能未加入公会），跳过公会签到。")
                 return STEP_SKIPPED
             self.log_info("公会签到：未检测到公会入口模板，且画面已不是主页，不点击公会按钮。")
-            return False
+            return self._step_failed("没认出公会入口，画面也不是主页")
 
+        marked = self._guild_entry_marked(frame)
+        self._status_set("公会入口红点", "有" if marked else "无")
+        result = self._visit_guild(linger=bool(marked))
+        if result is not True or not marked or self._home_lost_after_done:
+            return result
+        # Entering the guild page is the sign-in (Leo 2026-10-21 「進到公會就會
+        # 算簽到成功」).  The 「!」 still on home after the visit means the page
+        # was not really reached (popups): the guild is entered once more,
+        # and the step stands on that visit seeing the guild page.
+        if not self._guild_mark_stays():
+            self.log_info("公会签到：主页公会图标的红色「!」已消失，签到完成。")
+            return True
+        self.log_info("公会签到：回到主页后公会图标的红色「!」还在，再进一次公会。")
+        if not self._find_guild_entry()[0]:
+            return self._step_failed("回到主页后公会图标的红色「!」还在，也没认出公会入口")
+        return self._visit_guild(linger=True)
+
+    def _guild_entry_marked(self, frame) -> bool | None:
+        """Whether the guild entry shows its red 「!」; None when not seen."""
+        if getattr(frame, "ndim", 0) < 3:
+            return None
+        match, spec = self._match_best(frame, GUILD_ENTRY_TEMPLATES)
+        if not self._passes(match, spec):
+            return None
+        (x, y), (w, h) = match.position, match.size
+        left, top, right, bottom = GUILD_MARK_CORNER
+        height, width = frame.shape[:2]
+        x0, x1 = max(0, int(x + w * left)), min(width, int(x + w * right))
+        y0, y1 = max(0, int(y + h * top)), min(height, int(y + h * bottom))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return False
+        hsv = cv2.cvtColor(np.ascontiguousarray(frame[y0:y1, x0:x1, :3]), cv2.COLOR_BGR2HSV)
+        red = ((hsv[..., 0] <= 8) | (hsv[..., 0] >= 172)) & (hsv[..., 1] >= 150) & (
+            hsv[..., 2] >= 150
+        )
+        return float(red.mean()) >= GUILD_MARK_MIN_RED_SHARE
+
+    def _guild_mark_stays(self) -> bool:
+        """True while home's guild entry still shows the 「!」 (or is not seen)."""
+        end_at = monotonic() + GUILD_MARK_CLEAR_SECONDS
+        while True:
+            marked = self._guild_entry_marked(self.capture_frame())
+            if marked is False:
+                return False
+            if monotonic() >= end_at:
+                if marked is None:
+                    self.log_info("公会签到：回到主页后没认出公会图标，无法确认签到。")
+                return True
+            self.sleep(0.5)
+
+    def _visit_guild(self, linger: bool) -> bool:
+        """Enter the guild page from home and come back.
+
+        ``linger``: the entry was marked, so the sign-in panel is waited for
+        briefly when the page shows first."""
         self._status_set("公会判断", "已识别入口，进入公会")
         self._sleep_after_recognition()
         seen = [None, ""]
@@ -429,31 +557,58 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
                 f"公会签到：公会入口按了{len(presses)}次都没看到公会页面"
                 "（游戏没反应或可能未加入公会），未签到。"
             )
-            return False
+            return self._step_failed(f"公会入口按了{len(presses)}次都没进入公会页面")
         if state == "toast":
             self.log_info("公会签到：检测到签到成功提示。")
             self._sleep_after_recognition()
             self._click_reference(
                 *GUILD_SIGN_IN_SUCCESS_ACKNOWLEDGE_REFERENCE_POINT, after_sleep=0.5
             )
+        elif linger and self._wait_guild_toast(GUILD_TOAST_LINGER_SECONDS):
+            self.log_info("公会签到：进入公会页面后出现签到成功提示。")
         else:
             self.log_info("公会签到：已进入公会页面（今日签到提示已出现过或未弹出）。")
-        return self._return_home_from_guild()
+        # Entering the guild page is the sign-in: a popup over home on the
+        # way back does not undo it.
+        if not self._return_home_from_guild():
+            return self._home_after_done("公会签到")
+        return True
+
+    def _wait_guild_toast(self, timeout: float) -> bool:
+        """Wait on the guild page for the sign-in panel; tap it away when shown."""
+        if not wait_for(
+            lambda: self._wait_guild_page(0.0)[0] == "toast", timeout, sleep=self.sleep, poll=0.5
+        ):
+            return False
+        self._sleep_after_recognition()
+        self._click_reference(  # 不用确认：之后返回主页并看公会图标的「!」
+            *GUILD_SIGN_IN_SUCCESS_ACKNOWLEDGE_REFERENCE_POINT, after_sleep=0.5
+        )
+        return True
 
     def _wait_guild_page(self, timeout: float, load: bool = False) -> tuple[str | None, str]:
         """"toast" (签到成功 shown), "page" (guild page UI) or None.
 
+        The sign-in words count only over the guild page itself: event login
+        popups use the same words (player 2026-10-21, many popups on entry:
+        the step said done and the guild was never entered).  Such a popup
+        is tapped away on a blank spot.
+
         ``load``: the page comes after the guild loading screen (load_wait)."""
         end_at = monotonic() + timeout
-        wait = load_wait(monotonic(), timeout) if load else None
+        wait = load_wait(monotonic(), timeout, before=scene_at_press(self)) if load else None
         text = ""
         while True:
             frame = self.capture_frame()
             text = self._ocr_text(frame, name="公会页面")
-            if self._keyword_match_count(text, GUILD_SUCCESS_KEYWORDS) >= 1:
+            page_hits = self._keyword_match_count(text, GUILD_PAGE_KEYWORDS)
+            toast = self._keyword_match_count(text, GUILD_SUCCESS_KEYWORDS) >= 1
+            if toast and page_hits >= 1:
                 return "toast", text
-            if self._keyword_match_count(text, GUILD_PAGE_KEYWORDS) >= 2:
+            if page_hits >= 2:
                 return "page", text
+            if toast:
+                self._tap_away_popup()
             if wait is not None:
                 if wait.over(frame, monotonic(), loading=is_loading_dark(frame)):
                     return None, text
@@ -461,24 +616,58 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
                 return None, text
             self.sleep(0.5)
 
+    def _tap_away_popup(self) -> None:
+        """Tap the blank spot under a popup that is not the guild page."""
+        now = monotonic()
+        last = getattr(self, "_popup_tapped_at", None)
+        if last is not None and now - last < GUILD_POPUP_TAP_SECONDS:
+            return
+        self._popup_tapped_at = now
+        # A popup the shared closer knows first (live 2K 2026-10-22: the
+        # 公告 list over 主页 carries 签到 words; the blank spot is outside it
+        # and the run stood still until stopped).
+        if self.close_known_popup("公会签到", info_only=True):
+            return
+        self.log_info("公会签到：看到「签到成功」类文字但不是公会页面（别的弹窗），点空白处关掉。")
+        self.operate_click(  # 不用确认：调用方接着看公会页面或主页
+            *HOME_ANNOUNCEMENT_CLEAR_RELATIVE_POINT, after_sleep=0.5
+        )
+
     def _return_home_from_guild(self) -> bool:
         """Leave the guild page with bounded back-click retries.
 
         返回键点击可能被切页动画吞掉（BUG-20260901-02：单击定胜负让游戏
         滞留公会页面，本批与后续批次的公会任务全部失败）；主页确认失败且
-        全帧 OCR 仍能读到公会页面关键字时才补点返回键，最多 3 次。
+        全帧 OCR 仍能读到公会页面关键字时才补点返回键，最多 4 次。
+
+        桌面分身 1080p 2026-10-18: the first two presses right after the
+        sign-in were both swallowed and each waited 4 s for home (11 s in
+        all).  Home shows within 2 s once a press works, so the look after
+        a press is 2 s; the last press keeps the 4 s look.
         """
         home_ok = False
-        for attempt in range(1, 4):
+        for attempt in range(1, GUILD_BACK_ATTEMPTS + 1):
             self._click_reference(*BACK_BUTTON_REFERENCE_POINT, after_sleep=1.0)
-            if self._wait_for_home_confirmation("公会签到返回主页", timeout=4.0):
+            last = attempt >= GUILD_BACK_ATTEMPTS
+            look = GUILD_BACK_LAST_LOOK_SECONDS if last else GUILD_BACK_LOOK_SECONDS
+            if self._wait_for_home_confirmation("公会签到返回主页", timeout=look):
                 home_ok = True
                 break
-            if attempt >= 3:
+            if last:
                 break
             text = self._ocr_text(self.capture_frame(), name="公会签到返回页面")
             if self._keyword_match_count(text, GUILD_PAGE_KEYWORDS) < 1:
-                self.log_info("公会签到：返回后未见公会页面关键字，不再补点返回键。")
+                # Off the guild page but home not confirmed: an event popup
+                # dims home (2K 桌面分身 2026-10-16: 万圣节每日钻石通行证 7-day
+                # login popup covered the left column; the sign-in itself
+                # had worked).  Tap the blank spot once, as for the login
+                # notices, and look again.
+                if not self.close_known_popup("公会签到返回主页", info_only=True):
+                    self.log_info("公会签到：已离开公会页面，但主页被弹窗挡住，点空白处关掉再确认。")
+                    self.operate_click(  # 不用确认：下一行看主页
+                        *HOME_ANNOUNCEMENT_CLEAR_RELATIVE_POINT, after_sleep=1.0
+                    )
+                home_ok = self._wait_for_home_confirmation("公会签到返回主页", timeout=4.0)
                 break
             self.log_info(
                 f"公会签到：第{attempt}次返回未生效（仍在公会页面），补点返回键。"
@@ -490,7 +679,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         """``load``: the page comes after the my-home loading (load_wait)."""
         vision = self._quick_vision()
         end_at = monotonic() + timeout
-        wait = load_wait(monotonic(), timeout) if load else None
+        wait = load_wait(monotonic(), timeout, before=scene_at_press(self)) if load else None
         while True:
             frame = self.capture_frame()
             result = self._match(frame, MY_HOME_TEMPLATE)
@@ -515,7 +704,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
 
     def run_my_home_sign_in(self) -> bool:
         if not self._wait_for_home_confirmation("小屋签到入口前主页确认"):
-            return False
+            return self._step_failed("开始前不在主页（可能被弹窗挡住）")
 
         # The my-home.png template scores -1 at 4K, so waiting for it first
         # cost ~19 s per run (live 2026-09-27); the page title is read on
@@ -545,15 +734,17 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         else:
             self.log_info("小屋签到：未确认小屋页面标题，不执行返回点击。")
             self._status_set("小屋签到返回主页结果", "未执行")
-            return False
+            return self._step_failed("点了小屋入口，没认出小屋页面")
 
         home_ok = self._wait_for_home_confirmation("小屋签到返回主页")
         self._status_set("小屋签到返回主页结果", "通过" if home_ok else "失败")
-        return home_ok
+        if not home_ok:
+            return self._home_after_done("小屋签到")
+        return True
 
     def run_business_collect(self) -> bool:
         if not self._wait_for_home_confirmation("一键收菜入口前主页确认"):
-            return False
+            return self._step_failed("开始前不在主页（可能被弹窗挡住）")
 
         wait = float(self.config.get("一键收菜菜单等待秒数", 8.0))
         first_wait = min(wait, BUSINESS_ENTRY_RETRY_SECONDS)
@@ -574,7 +765,7 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         if not found:
             self.log_info("一键收菜：未检测到经营管理弹窗关键字，跳过点击。")
             self._status_set("一键收菜返回主页结果", "未执行")
-            return False
+            return self._step_failed("点了经营管理，没认出经营管理弹窗")
 
         claim = self._business_popup_box(boxes, frame, BUSINESS_COLLECT_CLAIM_TEXT)
         # The keyword gate can pass while the popup is still fading in (live
@@ -636,7 +827,11 @@ class DailyTask(TaskVisionMixin, QuickHuntConfigMixin, BaseBD2Task):
         self._settle_business_collect()
         home_ok = self._wait_for_home_confirmation("一键收菜返回主页")
         self._status_set("一键收菜返回主页结果", "通过" if home_ok else "失败")
-        return home_ok and claimed
+        if not claimed:
+            return self._step_failed("按了「一键获得」，没看到领取结果")
+        if not home_ok:
+            return self._home_after_done("一键收菜")
+        return True
 
     @staticmethod
     def _business_claim_colour(frame, box) -> tuple[float, float] | None:

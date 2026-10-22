@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Callable
 
-from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QDialog, QLabel, QSizePolicy, QWidget
+from PySide6.QtCore import (
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPauseAnimation,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    QSequentialAnimationGroup,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+)
+from PySide6.QtGui import QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QAbstractButton, QDialog, QLabel, QSizePolicy, QWidget
 
 from src.tasks import problem_report, run_report
+from src.tasks.DailyBatchTask import MAP_CHILD_KEY
 from src.tasks.BaseBD2Task import task_info_snapshot
 from src.tasks.map_trade import account_check
 from src.ui.shell import (
@@ -18,10 +31,13 @@ from src.ui.shell import (
     actions,
     autorun,
     clone_flow,
+    cover,
     data,
     hotkeys,
+    icons,
     motion,
     run_confirm,
+    schedule_ui,
     theme,
 )
 from src.ui.shell.page import Page
@@ -30,6 +46,7 @@ from src.utils import accounts
 from src.ui.shell.safe import guarded
 from src.ui.shell.trade_line import TradeLine
 from src.ui.shell.widgets import (
+    SHADOW_MARGINS,
     Bar,
     Button,
     Card,
@@ -42,6 +59,8 @@ from src.ui.shell.widgets import (
     Separator,
     StateIcon,
     Text,
+    Toggle,
+    attach_hint,
     clear_layout,
     draw_fitted,
     fmt_clock,
@@ -50,6 +69,7 @@ from src.ui.shell.widgets import (
     grid_container,
     hbox,
     mix,
+    set_prop,
     t,
     tf,
     vbox,
@@ -142,14 +162,125 @@ class StatCard(ClickableCard):
         self.foot.set_text(foot)
 
 
+class ScheduleCard(ClickableCard):
+    """定时启动 on 首页 (Leo 2026-10-22): the next start and the switch that
+    turns it all off; a click opens the window with the time slots."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, on_click=self._open)
+        layout = vbox(self, (16, 14, 16, 14), 8)
+        head = hbox(None, (0, 0, 0, 0), 8)
+        tile = IconTile("clock", 28, 16, kind="plain")
+        tile.follow_hover(self)
+        head.addWidget(tile)
+        head.addWidget(Text("定时启动", "sub"), 1)
+        self.toggle = Toggle(False, small=True)
+        self.toggle.setToolTip(t("关掉就完全取消，Windows 里也不留"))
+        self.toggle.toggled.connect(self._switched)
+        head.addWidget(self.toggle)
+        layout.addLayout(head)
+        value_row = hbox(None, (0, 0, 0, 0), 6)
+        self.value = Text("", "big")
+        self.unit = Text("", "muted")
+        value_row.addWidget(self.value)
+        value_row.addWidget(self.unit, 1, Qt.AlignBottom)
+        layout.addLayout(value_row)
+        self.foot = Text("", "muted", elide=True)
+        layout.addWidget(self.foot)
+        self.refresh()
+
+    def refresh(self) -> None:
+        settings = schedule_ui.settings()
+        self.toggle.set_checked_quietly(settings.enabled)
+        clock, day = schedule_ui.next_text()
+        count = len(settings.active_slots())
+        if not settings.enabled:
+            self.value.set_text("关")
+            self.unit.set_text("")
+            self.foot.set_text("点这里设定几点自动跑")
+        elif not clock:
+            self.value.set_text("—")
+            self.unit.set_text("")
+            self.foot.set_text("没有开着的时段，点这里设定")
+        else:
+            self.value.set_text(clock)
+            self.unit.set_text(day)
+            self.foot.set_text(tf("{n} 个时段，点这里设定", n=count))
+        role = "warn" if schedule_ui.problem and settings.enabled else "muted"
+        if self.foot.property("role") != role:
+            set_prop(self.foot, "role", role)
+        if role == "warn":
+            self.foot.set_text(schedule_ui.problem)
+
+    def _switched(self, on: bool) -> None:
+        why = schedule_ui.set_enabled(on)
+        if why:
+            self.toggle.set_checked_quietly(not on)
+            self.foot.set_text(why)
+            return
+        self.refresh()
+        if on and not schedule_ui.settings().slots:
+            self._open()  # nothing set yet: on is only useful with a time
+
+    def _open(self) -> None:
+        schedule_ui.ScheduleDialog(self.window()).exec()
+        self.refresh()
+
+
+class OrderButton(QAbstractButton):
+    """The small button on the 每周跑图 card: run it first, or last again
+    (Leo 2026-10-21; his pick of the list icons, the 「back」 one mirrored)."""
+
+    SIZE = 26
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._first: bool | None = None
+        self._hover = motion.HoverFade(self, self.update)
+        # The icon shrinks away and grows back in when it changes.
+        self._swap = motion.Tween(self, self.update, 260, 1.0)
+
+    def set_first(self, first: bool, animate: bool = True) -> None:
+        if first == self._first:
+            return
+        self._first = first
+        hint = "移回最后面，一键日常最后跑它" if first else "移到最前面，一键日常先跑它"
+        attach_hint(self, t(hint))
+        self._swap.value = 0.0 if animate else 1.0
+        self._swap.go(1.0, animate)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        hover = self._hover.value if self.isEnabled() else 0.0
+        fg, bg = theme.kind_colours("map")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(mix(bg, theme.color("primary"), hover))
+        painter.drawRoundedRect(QRectF(self.rect()), 7, 7)
+        swap = float(self._swap.value)
+        painter.setOpacity(swap if self.isEnabled() else 0.5 * swap)
+        side = 16 * (0.6 + 0.4 * swap)
+        box = QRectF((self.SIZE - side) / 2, (self.SIZE - side) / 2, side, side)
+        name = "list-end-left" if self._first else "list-start"
+        icons.paint(painter, box, name, mix(fg, theme.color("on_primary"), hover), 2.3)
+
+
 class BoardTile(ClickableCard):
     """One daily item: the check in the corner decides whether 一键完成日常 runs it,
     a click anywhere else opens its settings (Leo, 2026-10-08)."""
 
-    def __init__(self, child: data.Child, on_click=None, on_include=None, parent=None):
+    def __init__(
+        self, child: data.Child, on_click=None, on_include=None, on_move=None, parent=None
+    ):
         super().__init__(parent, on_click=on_click)
         self.child = child
-        layout = vbox(self, (12, 12, 12, 10), 6)
+        self.order: OrderButton | None = None
+        # A short violet glow when the card lands somewhere new.
+        self._flash = motion.Tween(self, self.update, 650, 0.0)
+        layout = vbox(self, (12, 12, 12, 10), 4)
         top = hbox(None, (0, 0, 0, 0), 0)
         self.tile = IconTile(child.icon, 30, 17, kind=child.kind)
         self.tile.follow_hover(self)
@@ -163,16 +294,51 @@ class BoardTile(ClickableCard):
         top.addWidget(self.include, 0, Qt.AlignTop)
         layout.addLayout(top)
         # a little air between the icon and the name (Leo, 2026-10-05)
-        layout.addSpacing(10)
+        layout.addSpacing(6)
         self.name = Text(child.short, "h3", elide=True)
         layout.addWidget(self.name)
-        state = hbox(None, (0, 0, 0, 0), 4)
+        # Room on the right for the order button, so it never covers the state.
+        state = hbox(None, (0, 0, OrderButton.SIZE + 4 if on_move is not None else 0, 0), 4)
         self.mark = StateIcon("done", 13)
         self.state = Text("", "muted", elide=True)
         state.addWidget(self.mark)
         state.addWidget(self.state, 1)
         layout.addLayout(state)
         layout.addStretch(1)
+        if on_move is not None:
+            # Over the card's corner, outside the layout, so every card keeps its lines.
+            self.order = OrderButton(self)
+            self.order.clicked.connect(lambda *_: on_move())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.order is not None:
+            _left, _top, right, bottom = SHADOW_MARGINS
+            side = OrderButton.SIZE
+            self.order.move(self.width() - right - 8 - side, self.height() - bottom - 8 - side)
+
+    def flash(self) -> None:
+        self._flash.value = 1.0
+        self._flash.go(0.0)
+
+    def edge_colour(self):
+        base = super().edge_colour()
+        flash = float(self._flash.value)
+        return mix(base, theme.color("primary"), flash) if flash > 0 else base
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        flash = float(self._flash.value)
+        if flash <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        left, top, right, bottom = SHADOW_MARGINS
+        body = QRectF(self.rect()).adjusted(left, top, -right, -bottom)
+        painter.setPen(QPen(theme.color("primary", 0.35 * flash), 3))
+        painter.setBrush(Qt.NoBrush)
+        corner = float(theme.radius()) + 2
+        painter.drawRoundedRect(body.adjusted(-2, -2, 2, 2), corner, corner)
 
     def set_included(self, included: bool) -> None:
         self.include.set_checked_quietly(included)
@@ -281,7 +447,7 @@ class PictureDialog(QDialog):
         self._open = motion.Tween(self, self.update, 200, 0.0)
         if parent is not None:
             window = parent.window()
-            self.setGeometry(window.geometry())
+            cover.follow(self, window)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -605,12 +771,16 @@ class HomePage(Page):
         self.last_card = StatCard(
             "list-checks", "今日报表", "plain", lambda: self._navigate("report")
         )
-        for card in (self.map_card, self.last_card):
+        # Leo 2026-10-22: 定时启动 in the third place of this row.
+        self.schedule_card = ScheduleCard()
+        for card in (self.map_card, self.last_card, self.schedule_card):
             grid.addWidget(card)
         layout.addWidget(stats)
 
-        head = hbox(None, (2, 6, 2, 0), 14)
+        head = hbox(None, (0, 6, 0, 0), 14)
         head.addWidget(Text("今日任务", "h2"))
+        self.map_order = Text("", "muted")
+        head.addWidget(self.map_order)
         head.addStretch(1)
         for state, label in (("done", "已完成"), ("wait", "未完成"), ("off", "不在一键日常里")):
             head.addWidget(StateIcon(state, 13))
@@ -620,7 +790,7 @@ class HomePage(Page):
         layout.addWidget(self.tiles_box)
         # Leo 2026-10-09: the 周常 in a row of their own; 一键日常 still runs them.
         self.week_head = QWidget()
-        week_head = hbox(self.week_head, (2, 6, 2, 0), 14)
+        week_head = hbox(self.week_head, (0, 6, 0, 0), 14)
         week_head.addWidget(Text("本周任务", "h2"))
         self.week_note = Text("", "muted")
         week_head.addWidget(self.week_note)
@@ -632,6 +802,7 @@ class HomePage(Page):
         layout.addWidget(self.game_size)
         self._tile_keys: list[str] = []
         self._tiles: dict[str, BoardTile] = {}
+        self._moving: QParallelAnimationGroup | None = None
         # (when, account id, progress): a switched account reads its own.
         self._map_cache: tuple[float, str, object] = (0.0, "", None)
 
@@ -642,6 +813,7 @@ class HomePage(Page):
             tf("{today} · 下次刷新 {next}", today=data.today_title(), next=data.next_refresh_text())
         )
         self.game_size.refresh()
+        self.schedule_card.refresh()
         batch = data.task_by_name(data.DAILY_BATCH)
         data.sync_weekly_ticks(batch)
         children = data.batch_children(batch)
@@ -741,6 +913,7 @@ class HomePage(Page):
                     child,
                     on_click=lambda key=child.key: self._open_task("daily", key),
                     on_include=self._set_included,
+                    on_move=self._move_map if child.key == MAP_CHILD_KEY else None,
                 )
                 (self.week_tiles if child.weekly else self.tiles).addWidget(tile)
                 self._tiles[child.key] = tile
@@ -751,8 +924,17 @@ class HomePage(Page):
         self.week_note.set_text(
             tf("跑过会自动取消勾选，每周{weekday} {time} 自动勾回来", **data.weekly_reset_parts())
         )
+        map_first = data.map_first()
+        has_map = MAP_CHILD_KEY in self._tiles
+        self.map_order.setVisible(has_map)
+        self.map_order.set_text("跑图顺序：最先跑" if map_first else "跑图顺序：最后跑")
+        if self._moving is not None:
+            return  # the cards are sliding; the next refresh fills them in
         for child in children:
             tile = self._tiles[child.key]
+            if tile.order is not None:
+                tile.order.set_first(map_first, animate=False)
+                tile.order.setEnabled(not busy)
             tile.set_included(child.included)
             if data.child_done(child):
                 record = data.last_run(child.name) or {}
@@ -765,6 +947,88 @@ class HomePage(Page):
                 tile.set_state("off", "不在一键日常里")
             else:
                 tile.set_state("wait", "本周未完成" if child.weekly else "未完成")
+
+    def _move_map(self) -> None:
+        """每周跑图 to the front of 一键日常, or back to the end (Leo 2026-10-21).
+
+        Every card slides from where it was to its new place; the 每周跑图
+        card hops over the others and glows when it lands.
+        """
+        tile = self._tiles.get(MAP_CHILD_KEY)
+        if tile is None or self._moving is not None:
+            return
+        first = not data.map_first()
+        if not data.set_map_first(first):
+            return
+        cards = [tile for tile in self._tiles.values() if not tile.child.weekly]
+        before = {card: card.pos() for card in cards}
+        self.tiles.move_widget(tile, 0 if first else -1)
+        # Lay out now (not on the next event) so the cards can be put back and slid.
+        self.tiles.activate()
+        batch = data.task_by_name(data.DAILY_BATCH)
+        self._tile_keys = [child.key for child in data.batch_children(batch)]
+        tile.order.set_first(first)
+        self.map_order.set_text("跑图顺序：最先跑" if first else "跑图顺序：最后跑")
+
+        group = QParallelAnimationGroup(self)
+        order = cards if first else list(reversed(cards))
+        for index, card in enumerate(order):
+            start, end = before[card], card.pos()
+            if start == end or card is tile:
+                continue
+            card.move(start)
+            # A small ripple: the cards nearest the gap move first.
+            steps = QSequentialAnimationGroup(group)
+            steps.addAnimation(QPauseAnimation(60 + 14 * index, steps))
+            slide = QPropertyAnimation(card, b"pos", steps)
+            slide.setStartValue(start)
+            slide.setEndValue(end)
+            slide.setDuration(380)
+            slide.setEasingCurve(QEasingCurve.OutCubic)
+            steps.addAnimation(slide)
+            group.addAnimation(steps)
+        start, end = before[tile], tile.pos()
+        if start != end:
+            tile.raise_()
+            tile.move(start)
+            hop = QVariantAnimation(group)
+            hop.setStartValue(0.0)
+            hop.setEndValue(1.0)
+            hop.setDuration(560)
+            hop.setEasingCurve(QEasingCurve.InOutCubic)
+
+            def step(value, start=start, end=end):
+                k = float(value)
+                lift = round(18 * math.sin(math.pi * k))
+                tile.move(start + (end - start) * k - QPoint(0, lift))
+
+            hop.valueChanged.connect(step)
+            group.addAnimation(hop)
+
+        def landed():
+            self._moving = None
+            self.tiles.setGeometry(self.tiles_box.contentsRect())
+            tile.flash()
+            self.refresh()
+
+        group.finished.connect(landed)
+        self._moving = group
+        group.start(QParallelAnimationGroup.DeleteWhenStopped)
+        self._say("每周跑图改成最先跑" if first else "每周跑图改成最后跑")
+
+    def _say(self, text: str) -> None:
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.success(
+                "",
+                t(text),
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+                duration=1800,
+            )
+        except Exception:
+            pass
 
     def _cancel_autorun(self) -> None:
         autorun.cancel()
@@ -1227,9 +1491,12 @@ class HomePage(Page):
     def _fill_pictures(self, grid, paths: list[str]) -> bool:
         while grid.count():
             item = grid.takeAt(0)
-            if item.widget() is not None:
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+            # A spacer has no widget (live 2K 2026-10-22: the refresh after
+            # a stopped run crashed here).
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
         shown = 0
         for path in paths:
             picture = Picture(path, radius=theme.radius(), background="shot")

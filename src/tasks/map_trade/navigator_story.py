@@ -20,6 +20,7 @@ from src.tasks.map_trade.models import (
     CARD_BY_ID,
     SUPPRESS_ONLY_VERIFIED_CARD_IDS,
     ABSORB_ONLY_VERIFIED_CARD_IDS,
+    ABSORB_LEFT_WHEN_DONE,
     MatchResult,
     NavigationResult,
     ScreenState,
@@ -109,9 +110,18 @@ from src.tasks.map_trade.navigator_constants import (
     StoryBadgeDetection,
     StoryBadgeGrid,
 )
+from src.tasks.BaseBD2Task import (
+    QUICK_SWITCH_HOME_LOOK_SECONDS,
+    QUICK_SWITCH_REPRESS_LOOK_SECONDS,
+)
 from src.tasks.map_trade.vision import normalize_text
 from src.utils.calibration import FHD_1080
-from src.utils.cartridge_quick_switch import QUICK_SWITCH_STABLE_FRAMES
+from src.utils.cartridge_quick_switch import (
+    LIFE_GAMEPLAY_CATEGORY_HIGHLIGHT_REGION,
+    LIFE_GAMEPLAY_CATEGORY_LABEL,
+    LIFE_GAMEPLAY_CATEGORY_POINT,
+    QUICK_SWITCH_STABLE_FRAMES,
+)
 
 # 从箱庭点击快速切换按钮的统一识别窗口与点击后停顿。
 QUICK_SWITCH_CLICK_TIMEOUT = 10.0
@@ -223,6 +233,13 @@ class StoryCardNavigationMixin:
             return "角色游戏卡", CHARACTER_CATEGORY_POINT, CHARACTER_CATEGORY_HIGHLIGHT_REGION
         if category == "event":
             return "活动游戏卡", EVENT_CATEGORY_POINT, EVENT_CATEGORY_HIGHLIGHT_REGION
+        if category == "life":
+            # 梦幻广场 sits in this tab (跑商 at the square, Leo 2026-10-20).
+            return (
+                LIFE_GAMEPLAY_CATEGORY_LABEL,
+                LIFE_GAMEPLAY_CATEGORY_POINT,
+                LIFE_GAMEPLAY_CATEGORY_HIGHLIGHT_REGION,
+            )
         return "剧情游戏卡", STORY_CATEGORY_POINT, STORY_CATEGORY_HIGHLIGHT_REGION
 
     def _click_quick_switch(
@@ -296,6 +313,23 @@ class StoryCardNavigationMixin:
                 return True
         return False
 
+    def _quick_switch_repress_hooks(self) -> dict:
+        """A dropped quick-switch press is made again at once, and 主页 gets a
+        short look before the P key (see open_cartridge_quick_switcher)."""
+        return {
+            "quick_switch_page_shown": lambda seconds: self._wait_for_ocr_keywords(
+                QUICK_SWITCH_PAGE_KEYWORDS, seconds, "卡带选择页", quiet=True
+            ),
+            "repress_quick_switch": lambda: self.vision.click_stable_template(
+                QUICK_SWITCH_TEMPLATE,
+                timeout=QUICK_SWITCH_REPRESS_LOOK_SECONDS,
+                after_sleep=QUICK_SWITCH_CLICK_AFTER_SLEEP,
+            ),
+            "home_shown": lambda: self._wait_for_cartridge_home(
+                timeout=QUICK_SWITCH_HOME_LOOK_SECONDS
+            ),
+        }
+
     def _open_story_quick_switcher(self, category: str = "story") -> NavigationResult:
         opened = self.task.open_cartridge_quick_switcher(
             ensure_home=self._wait_for_cartridge_home,
@@ -303,6 +337,7 @@ class StoryCardNavigationMixin:
                 QUICK_SWITCH_CLICK_TIMEOUT, QUICK_SWITCH_CLICK_AFTER_SLEEP
             ),
             confirm_quick_switch_page=self._wait_for_quick_switch_page,
+            **self._quick_switch_repress_hooks(),
         )
         if not opened:
             return NavigationResult(
@@ -2286,6 +2321,7 @@ class StoryCardNavigationMixin:
             ensure_home=self._wait_for_cartridge_home,
             click_quick_switch=lambda: self._click_quick_switch(10.0, 1.0),
             confirm_quick_switch_page=self._wait_for_quick_switch_page,
+            **self._quick_switch_repress_hooks(),
         )
         if opened:
             return NavigationResult(True, ScreenState.CARD_MENU)
@@ -2557,17 +2593,18 @@ class StoryCardNavigationMixin:
                 f"{completion.suppress.state.value}: {completion.suppress.reason}",
             )
             self._status("卡带完成度", completion.state.value)
-            # Before entering, a card with no 压制 badge counts as done once
-            # its 吸取 is ticked, as in inspect_collection_card_completion
-            # (live clone 2026-10-11: Q_ep2 missing from the records was
-            # entered again, and its 吸收 was already grey).
+            # Before entering, the same badge rules as after the run (live
+            # clone 2026-10-11: Q_ep2 missing from the records was entered
+            # again; Leo 2026-10-20: 第6章 with 压制 ticked and 吸取 「2」 was
+            # patrolled again).
             absorb_only_done = (
                 card_id in ABSORB_ONLY_VERIFIED_CARD_IDS
                 and completion.absorb.state == CardActionState.COMPLETED
             )
             if (
-                completion.state == CardActionState.COMPLETED or absorb_only_done
-            ) and not enter_visually_complete:
+                self._badges_say_done(card_id, completion, located.frame)
+                and not enter_visually_complete
+            ):
                 navigation = NavigationResult(
                     True,
                     ScreenState.CARD_MENU,
@@ -2594,6 +2631,50 @@ class StoryCardNavigationMixin:
             navigation,
             completion,
         )
+
+    def _badges_say_done(self, card_id: str, completion, frame) -> bool:
+        """The card's badges show it done for the week."""
+        absorb, suppress = completion.absorb.state, completion.suppress.state
+        if completion.state == CardActionState.COMPLETED:
+            return True
+        if card_id in ABSORB_ONLY_VERIFIED_CARD_IDS:
+            return absorb == CardActionState.COMPLETED
+        if card_id not in SUPPRESS_ONLY_VERIFIED_CARD_IDS:
+            return False
+        if suppress != CardActionState.COMPLETED:
+            return False
+        left_when_done = ABSORB_LEFT_WHEN_DONE.get(card_id)
+        if left_when_done is None or absorb != CardActionState.PENDING:
+            return True
+        left = self._absorb_left_on_badge(completion, frame)
+        self._status("卡带吸取剩余", "-" if left is None else str(left))
+        # Unread: the 压制 tick decides, as before 2026-10-20.
+        return left is None or left == left_when_done
+
+    def _absorb_left_on_badge(self, completion, frame) -> int | None:
+        """The small number on a pending 吸取 badge (第6章 「2」)."""
+        if not completion.absorb.pending:
+            return None
+        (x, y), (w, h) = (
+            completion.absorb.pending[0].result.position,
+            completion.absorb.pending[0].result.size,
+        )
+        height, width = frame.shape[:2]
+        # The number sits at the badge's lower right, partly outside it.
+        box = (
+            max(0.0, (x - w / 4) / width),
+            max(0.0, y / height),
+            min(1.0, (x + w * 1.5) / width),
+            min(1.0, (y + h * 1.5) / height),
+        )
+        try:
+            text = self.vision.ocr_text(
+                frame, "卡带吸取剩余", relative_roi=box, target_height=1080, ocr_scale=2.0
+            )
+        except (RuntimeError, ValueError, cv2.error, AttributeError):
+            return None
+        digits = re.sub(r"\D", "", str(text))
+        return int(digits) if digits and len(digits) <= 2 else None
 
     def inspect_collection_card_completion(
         self,
@@ -2652,17 +2733,7 @@ class StoryCardNavigationMixin:
             f"{completion.suppress.state.value}: {completion.suppress.reason}",
         )
         self._status("卡带完成度", completion.state.value)
-        completed = (
-            completion.state == CardActionState.COMPLETED
-            or (
-                card_id in SUPPRESS_ONLY_VERIFIED_CARD_IDS
-                and completion.suppress.state == CardActionState.COMPLETED
-            )
-            or (
-                card_id in ABSORB_ONLY_VERIFIED_CARD_IDS
-                and completion.absorb.state == CardActionState.COMPLETED
-            )
-        )
+        completed = self._badges_say_done(card_id, completion, located.frame)
         return CollectionCardSelectionResult(
             (
                 CollectionCardSelectionOutcome.VISUALLY_COMPLETE

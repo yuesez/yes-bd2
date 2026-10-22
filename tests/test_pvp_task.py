@@ -2108,13 +2108,28 @@ class PVPTaskHelperTest(unittest.TestCase):
         # The old check searched a box written in 1080p numbers as if they
         # were 1440p ones, so it never saw the F button "!"; this test only
         # mirrored that box and could not catch it (fixed 2026-10-03).
-        task = object.__new__(PVPTask)
-        calls = []
-        task.dismiss_field_followers = lambda **kwargs: calls.append(kwargs) or "dismissed"
+        look = {"appear_seconds": 5.0, "even_if_done_today": True}
+        for outcome, after in (
+            # Leo 2026-10-20: cleared → wait 1.5 s; not cleared (or never
+            # seen) → F once, then 1 s, before the walk to the stage.
+            ("dismissed", [("sleep", 1.5)]),
+            ("absent", [("key", "F", 1.0)]),
+            ("still_visible", [("key", "F", 1.0)]),
+            ("done_today", [("key", "F", 1.0)]),
+        ):
+            with self.subTest(outcome=outcome):
+                task = object.__new__(PVPTask)
+                calls = []
+                task.dismiss_field_followers = (
+                    lambda _o=outcome, **kwargs: calls.append(kwargs) or _o
+                )
+                task.sleep = lambda seconds: calls.append(("sleep", seconds))
+                task.tap_key = lambda key, after_sleep=0.0: calls.append(("key", key, after_sleep))
+                task.log_info = lambda *_a, **_k: None
 
-        PVPTask._clear_pvp_hub_notice_if_present(task)
+                PVPTask._clear_pvp_hub_notice_if_present(task)
 
-        self.assertEqual([{}], calls)
+                self.assertEqual([look, *after], calls)
 
     def test_dismiss_field_followers_presses_f_icon_once_on_real_frame(self):
         from src.utils.field_followers import dismissed_today, reset_dismissed
@@ -2858,6 +2873,38 @@ class PVPTaskHelperTest(unittest.TestCase):
         )
         self.assertIn((1381, 1061, 2.0), clicks)
 
+    def test_already_on_stage_skips_stage_search(self):
+        # Player v0.2.3 1080p 2026-10-20: the pre-battle screen (BATTLE,
+        # 阵形设置) was already up; the line-up hid the stage, the template
+        # never matched and the run stopped with 「未找到 PVP 舞台物件」.
+        task = object.__new__(PVPTask)
+        task.config = {}
+        task.info_set = lambda *_args, **_kwargs: None
+        task.log_info = lambda *_args, **_kwargs: None
+        task._click_template_until = lambda *_a, **_k: self.fail("searched for the stage")
+        task._recover_stage_position = lambda: self.fail("moved the camera")
+        task._save_flow_diagnostic = lambda name: self.fail(name)
+        names = []
+
+        def fake_wait(_patterns, timeout, name, **_kwargs):
+            names.append(name)
+            if name in ("PVP 战前画面", "PVP 自动战斗"):
+                return True, "自动战斗"
+            return False, ""
+
+        task._wait_for_ocr_patterns = fake_wait
+        self.assertTrue(PVPTask._click_pvp_stage_once(task, 10.0))
+        self.assertEqual(["PVP 战前画面"], names)
+
+    def test_stage_search_runs_when_not_on_stage(self):
+        task = object.__new__(PVPTask)
+        task.info_set = lambda *_args, **_kwargs: None
+        task._wait_for_ocr_patterns = lambda *_a, **_k: (False, "")
+        searched = []
+        task._click_template_until = lambda *a, **k: searched.append(a) or False
+        self.assertFalse(PVPTask._click_pvp_stage_once(task, 10.0))
+        self.assertEqual(1, len(searched))
+
     def test_start_auto_battle_timeout_saves_failure_diagnostic(self):
         task = object.__new__(PVPTask)
         task.config = {}
@@ -3372,6 +3419,61 @@ class PVPTaskHelperTest(unittest.TestCase):
 
         self.assertTrue(PVPTask._select_setting_multiplier(task, 40))
         self.assertEqual([PVP_MULTIPLIER_40_OPTION_SCREEN_POINT], state["clicks"])
+
+    @staticmethod
+    def _stepping_task(read_value):
+        """The setting dialog as a value moved by the step buttons; reads go
+        through ``read_value(true_value)``."""
+        from src.tasks.PVPTask import PVP_MULTIPLIER_STEP_POINTS
+
+        task = object.__new__(PVPTask)
+        task.info_set = lambda *_args, **_kwargs: None
+        task.log_info = lambda *_args, **_kwargs: None
+        task.sleep = lambda *_args: None
+        state = {"value": 40, "steps": []}
+        moves = {"big_plus": 5, "big_minus": -5, "plus": 1, "minus": -1}
+        by_point = {point: name for name, point in PVP_MULTIPLIER_STEP_POINTS.items()}
+
+        def option(x, y, after_sleep=0.0):
+            state["value"] = 40 if (x, y) == PVP_MULTIPLIER_40_OPTION_SCREEN_POINT else 1
+
+        def step(x, y, after_sleep=0.0):
+            name = by_point[(x, y)]
+            state["steps"].append(name)
+            if state.pop("swallow", False):
+                return
+            state["value"] = max(1, min(40, state["value"] + moves[name]))
+
+        task._click_screen_reference = option
+        task._click_reference = step
+        task._setting_multiplier_matches = lambda value: read_value(state["value"]) == value
+        task._setting_multiplier_value = lambda: read_value(state["value"])
+        return task, state
+
+    def test_select_setting_multiplier_presses_the_known_steps_from_min(self):
+        task, state = self._stepping_task(lambda value: value)
+
+        self.assertTrue(PVPTask._select_setting_multiplier(task, 8))
+        self.assertEqual(8, state["value"])
+        self.assertEqual(["big_plus", "plus", "plus"], state["steps"])
+
+    def test_select_setting_multiplier_steps_on_after_a_swallowed_press(self):
+        task, state = self._stepping_task(lambda value: value)
+        state["swallow"] = True
+
+        self.assertTrue(PVPTask._select_setting_multiplier(task, 8))
+        self.assertEqual(8, state["value"])
+        self.assertEqual(["big_plus", "plus", "plus", "big_plus"], state["steps"])
+
+    def test_select_setting_multiplier_never_turns_back_on_a_misread(self):
+        # A player 2026-10-21: 「一直点右边+1 和-5死循环了」.  Any value above
+        # 1 read 10 too high here, so stepping would go +1, -5, +1, -5 ...
+        task, state = self._stepping_task(lambda value: value if value == 1 else value + 10)
+
+        # Left to 确认, which checks the main popup and 战斗开始.
+        self.assertTrue(PVPTask._select_setting_multiplier(task, 3))
+        self.assertEqual(3, state["value"])
+        self.assertEqual(["plus", "plus"], state["steps"])
 
     def test_select_setting_multiplier_fails_after_retry_budget(self):
         task = object.__new__(PVPTask)

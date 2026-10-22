@@ -1,17 +1,19 @@
 import itertools
 import unittest
+from pathlib import Path
 
 from src.utils.cartridge_quick_switch import QUICK_SWITCH_STABLE_FRAMES
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
 from src.tasks.BaseBD2Task import CartridgeSpecialPageResult
+from src.utils.fantasia_square import LIFE_SLOT_POINTS, square_card_point
 from src.tasks.map_trade.models import MatchResult, TemplateSpec
 from src.tasks.SquareGoddessTask import (
     FANTASIA_SQUARE_TEMPLATE,
-    GODDESS_ALREADY_COMPLETE,
     GODDESS_NAVIGATION_CLICKED,
     QUICK_SWITCH_PAGE_PATTERNS,
     QUICK_SWITCH_TEMPLATE,
@@ -30,6 +32,8 @@ from src.utils.cartridge_quick_switch import (
     LIFE_GAMEPLAY_CATEGORY_POINT,
 )
 
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 class SquareGoddessEntryTest(unittest.TestCase):
     def test_home_requires_keyword_votes_brightness_and_gacha_ocr(self):
@@ -82,6 +86,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
             lambda spec, **_kwargs: stages.append(("quick", spec)) or True
         )
         task._wait_for_quick_switch_page = lambda: stages.append("page") or True
+        task._find_square_card = lambda: None
 
         def open_quick_switcher(**callbacks):
             return (
@@ -129,6 +134,8 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task.sleep = Mock()
         task.operate_click = Mock()
         task._wait_for_template = Mock(side_effect=[False, True])
+        task._find_square_card = lambda: None
+        task.log_info = Mock()
         task._handle_recent_cartridge_special_pages = Mock(
             return_value=CartridgeSpecialPageResult.HANDLED
         )
@@ -165,6 +172,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task._wait_for_template = lambda *_args, **_kwargs: self.fail(
             "square slot must not be clicked before the life category is confirmed"
         )
+        task._find_square_card = lambda: self.fail("no card look before the category")
 
         self.assertFalse(SquareGoddessTask._enter_square_from_home(task))
         self.assertEqual([(*LIFE_GAMEPLAY_CATEGORY_POINT, 0.0)], clicks)
@@ -185,12 +193,86 @@ class SquareGoddessEntryTest(unittest.TestCase):
         clicks = []
         task.operate_click = lambda x, y, after_sleep=0: clicks.append((x, y))
         task._wait_for_template = lambda *_args, **_kwargs: True
+        task._find_square_card = lambda: None
 
         self.assertTrue(SquareGoddessTask._enter_square_from_home(task))
         self.assertEqual(
             [LIFE_GAMEPLAY_CATEGORY_POINT] * 2 + [SQUARE_CARTRIDGE_SLOT_POINT] * 2,
             clicks,
         )
+
+    def _card_row_task(self, card_point, arrivals):
+        task = object.__new__(SquareGoddessTask)
+        task.config = {}
+        task.info_set = lambda *_args, **_kwargs: None
+        task.log_info = Mock()
+        task.open_cartridge_quick_switcher = lambda **_kwargs: True
+        task.sleep = lambda *_args, **_kwargs: None
+        task._wait_for_life_gameplay_category = lambda: True
+        task._quick_switch_still_shows = lambda **_kwargs: False
+        task._find_square_card = lambda: card_point
+        task._handle_recent_cartridge_special_pages = lambda **_kwargs: None
+        task._return_home_from_square = Mock(return_value=True)
+        task.clicks = []
+        task.operate_click = lambda x, y, after_sleep=0: task.clicks.append((x, y))
+        arrivals = iter(arrivals)
+        task._wait_for_template = lambda *_args, **_kwargs: next(arrivals)
+        return task
+
+    def test_entry_clicks_the_square_card_where_its_picture_is(self):
+        # v0.1.42 summary 2026-10-15: slot 2 of a player's row opened 格鲁菲餐厅.
+        first_slot = LIFE_SLOT_POINTS[1]
+        task = self._card_row_task(first_slot, [True])
+
+        self.assertTrue(SquareGoddessTask._enter_square_from_home(task))
+        self.assertEqual([LIFE_GAMEPLAY_CATEGORY_POINT, first_slot], task.clicks)
+        task._return_home_from_square.assert_not_called()
+
+    def test_unread_card_tries_the_next_slot_after_another_field_opens(self):
+        task = self._card_row_task(None, [False, True])
+
+        self.assertTrue(SquareGoddessTask._enter_square_from_home(task))
+        self.assertEqual(
+            [LIFE_GAMEPLAY_CATEGORY_POINT, LIFE_SLOT_POINTS[0]]
+            + [LIFE_GAMEPLAY_CATEGORY_POINT, LIFE_SLOT_POINTS[1]],
+            task.clicks,
+        )
+        self.assertEqual(SQUARE_CARTRIDGE_SLOT_POINT, LIFE_SLOT_POINTS[0])
+        task._return_home_from_square.assert_called_once()
+        task.log_info.assert_any_call("广场女神像：没认出广场卡带的图，改点生活玩法第2格。")
+        task.log_info.assert_any_call("广场女神像：没认出广场卡带的图，改点生活玩法第1格。")
+
+    def test_unread_card_stops_after_every_slot(self):
+        task = self._card_row_task(None, [False] * len(LIFE_SLOT_POINTS))
+
+        self.assertFalse(SquareGoddessTask._enter_square_from_home(task))
+        self.assertEqual(list(LIFE_SLOT_POINTS), task.clicks[1::2])
+        self.assertEqual(len(LIFE_SLOT_POINTS) - 1, task._return_home_from_square.call_count)
+
+    def test_card_found_by_picture_is_not_retried_elsewhere(self):
+        task = self._card_row_task(LIFE_SLOT_POINTS[0], [False])
+
+        self.assertFalse(SquareGoddessTask._enter_square_from_home(task))
+        task._return_home_from_square.assert_not_called()
+
+    def test_square_card_picture_on_the_life_row(self):
+        frame = cv2.imread(str(FIXTURES / "quick_switch" / "life_gameplay_selected_fhd.png"))
+        point, score = square_card_point(frame, {}, {})
+        self.assertGreater(score, 0.95)
+        self.assertAlmostEqual(331 / 1920, point[0], delta=0.01)
+        # The same row in another order: the square card first.
+        swapped = frame.copy()
+        swapped[920:1030, 80:220] = frame[920:1030, 260:400]
+        swapped[920:1030, 260:400] = frame[920:1030, 80:220]
+        point, _score = square_card_point(swapped, {}, {})
+        self.assertAlmostEqual(149 / 1920, point[0], delta=0.01)
+        for size in ((2560, 1440), (3840, 2160), (1280, 720)):
+            with self.subTest(size=size):
+                scaled = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+                point, _score = square_card_point(scaled, {}, {})
+                self.assertAlmostEqual(331 / 1920, point[0], delta=0.01)
+        battle = cv2.imread(str(FIXTURES / "quick_switch" / "battle_gameplay_selected_fhd.png"))
+        self.assertIsNone(square_card_point(battle, {}, {})[0])
 
     def test_quick_switch_uses_green_template_and_pixel_threshold(self):
         self.assertEqual(
@@ -351,9 +433,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task.info_set = lambda *_args, **_kwargs: None
         task.log_info = lambda *_args, **_kwargs: None
         stages = []
-        task._click_square_notice_if_present = lambda **kwargs: stages.append(
-            ("notice", kwargs["timeout"])
-        ) or False
+        task._click_square_notice_if_present = lambda: stages.append("notice") or False
         task._click_goddess_daily_navigation_until = (
             lambda **_kwargs: stages.append("navigation") or GODDESS_NAVIGATION_CLICKED
         )
@@ -363,7 +443,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
 
         self.assertTrue(SquareGoddessTask._pray_at_goddess(task))
         self.assertEqual(
-            [("notice", 3.0), "navigation", "pray", ("notice", 5.0)],
+            ["notice", "navigation", "pray", "notice"],
             stages,
         )
 
@@ -371,13 +451,13 @@ class SquareGoddessEntryTest(unittest.TestCase):
         for post_notice_found in (False, True):
             with self.subTest(post_notice_found=post_notice_found):
                 task = object.__new__(SquareGoddessTask)
-                task.config = {"祈祷完成后感叹号等待秒数": 5.0}
+                task.config = {}
                 task.info_set = lambda *_args, **_kwargs: None
                 task.log_info = lambda *_args, **_kwargs: None
                 notice_calls = []
 
-                def click_notice(**kwargs):
-                    notice_calls.append(kwargs["timeout"])
+                def click_notice():
+                    notice_calls.append("look")
                     return len(notice_calls) == 2 and post_notice_found
 
                 task._click_square_notice_if_present = click_notice
@@ -387,7 +467,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
                 task._wait_for_goddess_prayer_completion = lambda **_kwargs: True
 
                 self.assertTrue(SquareGoddessTask._pray_at_goddess(task))
-                self.assertEqual([3.0, 5.0], notice_calls)
+                self.assertEqual(["look", "look"], notice_calls)
 
     def test_missing_navigation_fails_even_after_dispatch_notice(self):
         task = object.__new__(SquareGoddessTask)
@@ -395,9 +475,7 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task.info_set = lambda *_args, **_kwargs: None
         task.log_info = lambda *_args, **_kwargs: None
         stages = []
-        task._click_square_notice_if_present = lambda **kwargs: stages.append(
-            ("notice", kwargs["timeout"])
-        ) or False
+        task._click_square_notice_if_present = lambda: stages.append("notice") or False
         task._click_goddess_daily_navigation_until = (
             lambda **_kwargs: stages.append("navigation") or False
         )
@@ -407,37 +485,17 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task._wished_today = lambda: False
         task._prayer_prompt_steady = lambda: False
         task._press_row_where_it_usually_is = lambda: False
+        task._walk_by_key = lambda: False
 
         self.assertFalse(SquareGoddessTask._pray_at_goddess(task))
         self.assertEqual(
-            [("notice", 3.0), "navigation"],
+            ["notice", "navigation"],
             stages,
         )
         # Already wished today: the missing hint means done, not failed.
         task._wished_today = lambda: True
         self.assertTrue(SquareGoddessTask._pray_at_goddess(task))
         self.assertNotIn("pray", stages)
-
-    def test_explicit_completed_task_skips_navigation_and_prayer(self):
-        task = object.__new__(SquareGoddessTask)
-        task.config = {}
-        task.info_set = lambda *_args, **_kwargs: None
-        messages = []
-        task.log_info = lambda message, **_kwargs: messages.append(message)
-        notice_calls = []
-        task._click_square_notice_if_present = (
-            lambda **kwargs: notice_calls.append(kwargs["timeout"]) or True
-        )
-        task._click_goddess_daily_navigation_until = (
-            lambda **_kwargs: GODDESS_ALREADY_COMPLETE
-        )
-        task._wait_for_goddess_prayer_completion = (
-            lambda **_kwargs: self.fail("No prayer wait for completed task")
-        )
-
-        self.assertTrue(SquareGoddessTask._pray_at_goddess(task))
-        self.assertEqual([3.0], notice_calls)
-        self.assertEqual(["广场女神像：已确认女神像许愿任务完成。"], messages)
 
     def test_successful_run_returns_home_after_prayer(self):
         task = object.__new__(SquareGoddessTask)
@@ -677,16 +735,44 @@ class SquareGoddessEntryTest(unittest.TestCase):
         self.assertEqual(1, sum("执行第3次点击" in message for message in logs))
 
     def test_square_notice_dismisses_field_followers(self):
+        from src.utils.field_followers import reset_dismissed
+
+        reset_dismissed()
         task = object.__new__(SquareGoddessTask)
         calls = []
         task.dismiss_field_followers = lambda **kwargs: calls.append(kwargs) or outcome
+        task.sleep = lambda seconds: calls.append(("sleep", seconds))
 
-        for outcome, expected in (("dismissed", True), ("still_visible", True), ("absent", False)):
+        for outcome, expected in (
+            ("dismissed", True),
+            ("still_visible", True),
+            ("absent", False),
+            ("done_today", False),
+        ):
             with self.subTest(outcome=outcome):
                 self.assertEqual(
-                    expected, SquareGoddessTask._click_square_notice_if_present(task, timeout=5.0)
+                    expected, SquareGoddessTask._click_square_notice_if_present(task)
                 )
-        self.assertEqual([{"appear_seconds": 5.0}] * 3, calls)
+        # 5 s for the "!", 5 s for the crowd, then the F key; 1.5 s after a
+        # press clears it (Leo 2026-10-20).
+        look = {"appear_seconds": 5.0, "gather_seconds": 5.0, "use_key": True}
+        self.assertEqual([look, ("sleep", 1.5), look, look, look], calls)
+
+    def test_square_notice_after_todays_press_only_glances(self):
+        # 「鏡中之戰趕走過 工具就記錄一下 廣場就不用等了」 (Leo 2026-10-20).
+        from src.utils.field_followers import mark_dismissed, reset_dismissed
+
+        task = object.__new__(SquareGoddessTask)
+        calls = []
+        task.dismiss_field_followers = lambda **kwargs: calls.append(kwargs) or "absent"
+        task.sleep = lambda seconds: calls.append(("sleep", seconds))
+        mark_dismissed()
+        self.addCleanup(reset_dismissed)
+
+        self.assertFalse(SquareGoddessTask._click_square_notice_if_present(task))
+        self.assertEqual(
+            [{"appear_seconds": 0.5, "use_key": True, "even_if_done_today": True}], calls
+        )
 
     def test_prayer_prefers_ocr_center_and_confirms_navigation_disappeared(self):
         task = object.__new__(SquareGoddessTask)
@@ -734,10 +820,55 @@ class SquareGoddessEntryTest(unittest.TestCase):
         task._observe_goddess_navigation = lambda frame: SimpleNamespace(navigation=row)
         clicks = []
         task._click_client = lambda *args, **kwargs: clicks.append(args[:2])
+        keys = []
+        task.tap_key = lambda key, after_sleep=0.0: keys.append(key) or True
+        task._wait_for_daily_navigation_to_disappear = lambda **_kwargs: False
         clock = iter(range(0, 1000, 10))
         with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=lambda: next(clock)):
             self.assertFalse(task._wait_for_goddess_prayer_completion(timeout=300))
         self.assertEqual([(1680, 314), (1680, 314)], clicks)
+        # Before giving up, the talk key F once (Leo 2026-10-20).
+        self.assertEqual(["F"], keys)
+
+    def test_unread_prompt_wishes_with_f_when_the_row_goes_away(self):
+        task = object.__new__(SquareGoddessTask)
+        task.config = {"女神像导航重试秒数": 35.0}
+        task.info_set = lambda *args: None
+        task.log_info = lambda *args: None
+        task.sleep = lambda *args: None
+        task.capture_frame = lambda: np.zeros((1080, 1920, 3), dtype=np.uint8)
+        task._ocr_pattern_click_point = lambda *args, **kwargs: (None, "")
+        task._observe_goddess_navigation = lambda frame: SimpleNamespace(navigation=None)
+        task._click_client = lambda *args, **kwargs: None
+        keys = []
+        task.tap_key = lambda key, after_sleep=0.0: keys.append(key) or True
+        task._wait_for_daily_navigation_to_disappear = lambda **_kwargs: True
+        clock = iter(range(0, 1000, 10))
+        with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=lambda: next(clock)):
+            self.assertTrue(task._wait_for_goddess_prayer_completion(timeout=300))
+        self.assertIn("F", keys)
+
+    def test_wish_made_leaves_within_seconds_without_pressing_e(self):
+        # Player report 2026-10-20: wished, then the tool stood there for
+        # minutes and called it unfinished.  A late done-read after the press
+        # still ends the wait, and E (dead after the wish) is never pressed.
+        task = object.__new__(SquareGoddessTask)
+        task.config = {}
+        task.info_set = lambda *args: None
+        task.log_info = lambda *args: None
+        task.sleep = lambda *args: None
+        task.capture_frame = lambda: np.zeros((1080, 1920, 3), dtype=np.uint8)
+        prompts = iter([((1410, 880), "向女神像许愿")])
+        task._ocr_pattern_click_point = lambda *args, **kwargs: next(prompts, (None, ""))
+        task._observe_goddess_navigation = lambda frame: SimpleNamespace(navigation=None)
+        task._click_client = lambda *args, **kwargs: None
+        task.tap_key = lambda key, after_sleep=0.0: self.fail(f"no key after the wish: {key}")
+        checks = iter([False, True])
+        task._wait_for_daily_navigation_to_disappear = lambda **_kwargs: next(checks)
+        clock = iter(range(0, 1000))
+        with patch("src.tasks.SquareGoddessTask.monotonic", side_effect=lambda: next(clock)):
+            self.assertTrue(task._wait_for_goddess_prayer_completion(timeout=90))
+            self.assertLess(next(clock), 15)
 
     def test_prayer_without_prompt_never_clicks_or_completes(self):
         task = object.__new__(SquareGoddessTask)
@@ -902,10 +1033,11 @@ if __name__ == "__main__":
 class SquareArrivalWaitTest(unittest.TestCase):
     """Leo 2026-10-15 「我說的10秒是卡死 或者辨識不到」: loading is not stuck."""
 
-    def _run(self, screen_at, prompt_at=None):
+    def _run(self, screen_at, prompt_at=None, before=None):
         from src.utils.wait_limits import STUCK_SECONDS  # noqa: F401
 
         task = object.__new__(SquareGoddessTask)
+        task._scene_at_press = before
         task.config = {}
         task.info_set = lambda *_args, **_kwargs: None
         logs = []
@@ -952,3 +1084,24 @@ class SquareArrivalWaitTest(unittest.TestCase):
         arrived, now, _logs = self._run(lambda t: self.BLACK)
         self.assertFalse(arrived)
         self.assertTrue(LOADING_MAX_SECONDS <= now <= LOADING_MAX_SECONDS + 1.0, now)
+
+    def test_the_bright_square_splash_after_the_press_is_loading(self):
+        # 2K clone 2026-10-19: the bright 「FANTASIA SQUARE」 splash (its saved
+        # frame) stood still from the card press until the square ~13 s later.
+        from pathlib import Path
+
+        import cv2
+
+        from src.utils.wait_limits import scene
+
+        splash = cv2.imread(
+            str(Path(__file__).parent / "fixtures" / "goddess" / "square_splash_2k_clone_thumb.jpg")
+        )
+        quick_switch_page = np.full(splash.shape, 40, np.uint8)
+        arrived, now, _logs = self._run(
+            lambda t: splash if t < 13.0 else self.SQUARE,
+            prompt_at=13.0,
+            before=scene(quick_switch_page),
+        )
+        self.assertTrue(arrived)
+        self.assertEqual(13.0, now)

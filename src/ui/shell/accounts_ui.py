@@ -14,10 +14,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QWidget
+from PySide6.QtWidgets import QFileDialog, QLabel, QWidget
 
 from src.ui.shell import data, icons, motion, theme
-from src.ui.shell.run_confirm import HeroIcon, Panel
+from src.ui.shell.floating import Floating, Panel
+from src.ui.shell.run_confirm import HeroIcon
 from src.ui.shell.widgets import Button, Inset, Separator, Text, hbox, mix, t, tf, vbox
 from src.utils import accounts
 
@@ -329,56 +330,6 @@ class AccountMenu(QWidget):
 # ---------------------------------------------------------------- dialogs
 
 
-class _Floating(QDialog):
-    """A dimmed window over the tool with one :class:`Panel` in the middle."""
-
-    PANEL_WIDTH = 520
-
-    def __init__(self, parent: QWidget | None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setModal(True)
-        self.setStyleSheet(theme.style_sheet())
-        self._open = motion.Tween(self, self._place, 220, 0.0)
-        self.panel = Panel(self)
-        pad = Panel.SHADOW
-        self.column = vbox(self.panel, (pad + 28, pad - 6 + 24, pad + 28, pad + 6 + 24), 14)
-        if parent is not None:
-            self.setGeometry(parent.window().geometry())
-
-    def _place(self) -> None:
-        area = self.rect()
-        width = min(self.PANEL_WIDTH + 2 * Panel.SHADOW, area.width() - 32)
-        self.panel.setFixedWidth(width)
-        self.panel.layout().activate()
-        height = min(self.panel.sizeHint().height(), area.height() - 32)
-        self.panel.setFixedHeight(height)
-        shown = float(self._open.value)
-        x = (area.width() - width) // 2
-        y = (area.height() - height) // 2 + round(14 * (1 - shown))
-        self.panel.move(x, y)
-        self.update()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._place()
-        self._open.go(1.0)
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.fillRect(
-            self.rect(),
-            theme.color(
-                "shot", (0.62 if theme.tokens() is theme.DARK else 0.42) * float(self._open.value)
-            ),
-        )
-
-
 class _ManageRow(QWidget):
     def __init__(self, account: accounts.Account, dialog: ManageDialog):
         super().__init__()
@@ -468,7 +419,7 @@ class _ManageRow(QWidget):
             self.delete.setFixedSize(36, 36)
 
 
-class ManageDialog(_Floating):
+class ManageDialog(Floating):
     def __init__(self, parent: QWidget | None, focus: str | None = None):
         super().__init__(parent)
         head = hbox(None, (0, 0, 0, 0), 14)
@@ -506,6 +457,9 @@ class ManageDialog(_Floating):
         while self.rows.count():
             item = self.rows.takeAt(0)
             if item.widget() is not None:
+                # Off the list at once: deleteLater waits for the event loop,
+                # and until then the old row still sat below the new ones.
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         for account in accounts.accounts():
             row = _ManageRow(account, self)
@@ -533,7 +487,7 @@ class ManageDialog(_Floating):
                     row.avatar.set_account(fresh)
 
 
-class MismatchDialog(_Floating):
+class MismatchDialog(Floating):
     """跑图 stopped: its records said done, the game showed the cards untouched."""
 
     SWITCH = 1
@@ -560,10 +514,24 @@ class MismatchDialog(_Floating):
             label.setStyleSheet(f"color: {theme.tokens()['warn']};")
             warn_box.addWidget(label)
         self.column.addWidget(warn)
-        buttons = hbox(None, (0, 4, 0, 0), 10)
-        buttons.addStretch(1)
-        buttons.addWidget(Button("就是这个账号，重新看画面", "secondary", on_click=self._same))
-        buttons.addWidget(Button("切换账号", "primary", "users-round", on_click=self._switch))
+        same = Button("就是这个账号，重新看画面", "secondary", parent=self.panel, on_click=self._same)
+        switch = Button(
+            "切换账号", "primary", "users-round", parent=self.panel, on_click=self._switch
+        )
+        for button in (same, switch):
+            button.ensurePolished()
+        # Side by side when both fit; else one above the other (the Japanese
+        # text was cut, 2026-10-22 check).
+        room = self.PANEL_WIDTH - 2 * 28
+        if same.sizeHint().width() + switch.sizeHint().width() + 10 <= room:
+            buttons = hbox(None, (0, 4, 0, 0), 10)
+            buttons.addStretch(1)
+            buttons.addWidget(same)
+            buttons.addWidget(switch)
+        else:
+            buttons = vbox(None, (0, 4, 0, 0), 8)
+            buttons.addWidget(switch)
+            buttons.addWidget(same)
         self.column.addLayout(buttons)
 
     def _same(self) -> None:

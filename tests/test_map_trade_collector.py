@@ -135,8 +135,10 @@ class CollectionRunTest(unittest.TestCase):
             progress.state.daily_submaps = 18
             progress.state.daily_summons = 12
             progress.state.daily_suppressions = 12
+            progress.state.game_counts["吸收"] = (18, 21)
             progress.save()
             events = []
+            absorbed = [18]
             task = SimpleNamespace(
                 config={"卡带单步重试次数": 1},
                 log_warning=lambda *_args: None,
@@ -183,7 +185,10 @@ class CollectionRunTest(unittest.TestCase):
             def fake_use_actions(actions, *, card_id, map_role):
                 events.append(("actions", tuple(action.name for action in actions)))
                 _seed_action_records(progress, card_id, map_role.value)
-                return SkillExecutionResult(True)
+                absorbed[0] += 1
+                # The game's count after the press (21/21 on the third map).
+                progress.reconcile_pending("吸收", (absorbed[0], 21))
+                return SkillExecutionResult(True, absorbed[0] >= 21)
 
             collector._use_actions = fake_use_actions
 
@@ -225,8 +230,10 @@ class CollectionRunTest(unittest.TestCase):
             progress.state.daily_submaps = 18
             progress.state.daily_summons = 12
             progress.state.daily_suppressions = 12
+            progress.state.game_counts["吸收"] = (18, 21)
             progress.save()
             events = []
+            absorbed = [18]
             task = SimpleNamespace(
                 config={"卡带单步重试次数": 1},
                 log_warning=lambda *_args: None,
@@ -280,7 +287,10 @@ class CollectionRunTest(unittest.TestCase):
             def fake_use_actions(actions, *, card_id, map_role):
                 events.append(("actions", tuple(action.name for action in actions)))
                 _seed_action_records(progress, card_id, map_role.value)
-                return SkillExecutionResult(True)
+                absorbed[0] += 1
+                # The game's count after the press (21/21 on the third map).
+                progress.reconcile_pending("吸收", (absorbed[0], 21))
+                return SkillExecutionResult(True, absorbed[0] >= 21)
 
             collector._use_actions = fake_use_actions
 
@@ -315,7 +325,10 @@ class CollectionRunTest(unittest.TestCase):
                 lambda: datetime(2026, 8, 3, 12, tzinfo=UTC_PLUS_8),
             )
             progress.load()
+            # Only the game's count stops the day (Leo 2026-10-20): this PC's
+            # tally alone no longer does.
             progress.state.daily_submaps = 19
+            progress.state.game_counts["吸收"] = (21, 21)
             progress.save()
             task = SimpleNamespace(
                 config={"卡带单步重试次数": 1},
@@ -324,7 +337,7 @@ class CollectionRunTest(unittest.TestCase):
             )
             navigator = SimpleNamespace(
                 select_collection_card=lambda *_args, **_kwargs: self.fail(
-                    "an incomplete card must not be started"
+                    "no card is started when the game shows 21/21"
                 )
             )
 
@@ -333,7 +346,7 @@ class CollectionRunTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertTrue(result.depleted)
         self.assertEqual(0, result.completed_submaps)
-        self.assertTrue(progress.state.depleted_today)
+        self.assertTrue(progress.game_used_up("吸收"))
 
     def test_formal_collection_skips_unsupported_chapter_without_progress(self):
         # No chapter is unsupported since chapter 14 got its route; the skip
@@ -478,8 +491,9 @@ class CollectionRunTest(unittest.TestCase):
             events,
         )
 
-    def test_an_unfinished_card_is_reset_and_the_run_goes_on(self):
-        # Leo 2026-10-05: 第6章's badge kept 2 pickups and the run stopped there.
+    def test_an_ordinary_card_is_done_once_its_three_maps_are_done(self):
+        # Leo 2026-10-21 「明明三張圖都有紀錄有吸收 就完成了」: badges read
+        # open after all three maps no longer send the card round again.
         with tempfile.TemporaryDirectory() as temp_dir:
             progress = ProgressStore(
                 Path(temp_dir) / "progress.json",
@@ -536,85 +550,47 @@ class CollectionRunTest(unittest.TestCase):
 
             self.assertTrue(result.success)
             self.assertEqual(["Q_sp1", "Q_sp2"], selected)
-            # Leo 2026-10-06: the maps that were done stay recorded.
-            self.assertEqual(3, len(progress.state.completed_targets("Q_sp1")))
-            self.assertFalse(progress.state.card_verified("Q_sp1"))
+            self.assertTrue(progress.state.card_verified("Q_sp1"))
             self.assertTrue(progress.state.card_verified("Q_sp2"))
-            self.assertIn("Q_sp1", result.message)
-            self.assertTrue(any("其余地图保留记录" in text for text in warnings))
+            self.assertTrue(any("记为本周完成" in text for text in warnings))
+            self.assertNotIn("不再跑", result.message)
             self.assertEqual(0, progress.pending_count())
 
-    def test_only_maps_absorbed_before_the_search_started_are_redone(self):
-        # Leo 2026-10-05: 第6章's badge kept 2 pickups and the run stopped there.
+            selected.clear()
+            with patch("src.tasks.map_trade.collector.COLLECTABLE_CARDS", cards):
+                again = Collector(task, object(), navigator, progress).run()
+            self.assertTrue(again.success)
+            self.assertEqual([], selected)
+
+    def test_old_records_of_three_done_maps_count_as_done_without_entering(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             progress = ProgressStore(
                 Path(temp_dir) / "progress.json",
                 lambda: datetime(2026, 8, 11, 12, tzinfo=UTC_PLUS_8),
             )
             progress.load()
-            cards = (CARD_BY_ID["Q_sp1"], CARD_BY_ID["Q_sp2"])
-            warnings = []
+            cards = (CARD_BY_ID["Q_sp5"], CARD_BY_ID["Q_sp6"])
+            for card in cards:
+                progress.state.cards[card.card_id] = [target.key for target in card.targets]
+            progress.save()
+            checked = []
+            navigator = SimpleNamespace(
+                select_collection_card=lambda card_id, **_kwargs: self.fail("entered"),
+                inspect_collection_card_completion=lambda card_id: (
+                    checked.append(card_id) or self.fail("badges read")
+                ),
+            )
             task = SimpleNamespace(
                 config={"卡带单步重试次数": 1},
                 info_set=lambda *_args: None,
-                log_warning=warnings.append,
+                log_warning=lambda *_args: None,
             )
-            selected = []
-            navigator = SimpleNamespace(
-                select_collection_card=lambda card_id, **_kwargs: (
-                    selected.append(card_id)
-                    or CollectionCardSelectionResult(
-                        CollectionCardSelectionOutcome.ENTERED,
-                        NavigationResult(True, ScreenState.SANDBOX),
-                    )
-                ),
-                current_collection_target=lambda _card: None,
-                prepare_collection_main_area=lambda _card_id, **_kwargs: NavigationResult(
-                    True, ScreenState.SANDBOX
-                ),
-                advance_collection_map=lambda *_args: NavigationResult(True, ScreenState.SANDBOX),
-                open_story_quick_switcher_from_sandbox=lambda **_kwargs: NavigationResult(
-                    True, ScreenState.CARD_MENU
-                ),
-                inspect_collection_card_completion=lambda card_id: NavigationResult(
-                    card_id != "Q_sp1", ScreenState.CARD_MENU, "未同时确认吸取与压制完成"
-                ),
-            )
-            collector = Collector(task, object(), navigator, progress)
-            collector._absorb_used_up = lambda **_kwargs: None
-            # 第12章 town: the first map's 探查 was not seen to start.
-            searches = []
-
-            def ensure_search(**kwargs):
-                searches.append(kwargs)
-                if len(searches) == 1:
-                    return None
-                return SearchCountdownSession((0.1, 0.2, 0.3, 0.4), 80)
-
-            collector._ensure_search = ensure_search
-            collector._verify_search_countdown = lambda _session: True
-
-            def use_actions(actions, *, card_id, map_role):
-                for action in actions:
-                    limit = {"吸收": 21, "召集": 21, "压制": 70}[action.name]
-                    progress.arm_action(card_id, map_role, action.name, baseline=(0, limit))
-                    progress.mark_action_local_done(card_id, map_role, action.name, pending=True)
-                return SkillExecutionResult(
-                    True, pending_actions=tuple(action.name for action in actions)
-                )
-
-            collector._use_actions = use_actions
             with patch("src.tasks.map_trade.collector.COLLECTABLE_CARDS", cards):
-                result = collector.run()
-
+                result = Collector(task, object(), navigator, progress).run()
             self.assertTrue(result.success)
-            self.assertEqual(["Q_sp1", "Q_sp2"], selected)
-            first_map = CARD_BY_ID["Q_sp1"].targets[0].key
-            kept = progress.state.completed_targets("Q_sp1")
-            self.assertEqual(2, len(kept))
-            self.assertNotIn(first_map, kept)
-            self.assertTrue(any("之后重做" in text for text in warnings))
-            self.assertEqual(0, progress.pending_count())
+            # 第6章 too (Leo 2026-10-21 「第六章確認跑過一遍就算完成」).
+            for card in cards:
+                self.assertTrue(progress.state.card_verified(card.card_id))
 
     def test_final_map_pending_is_success_warning_and_completed_target_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -997,6 +973,32 @@ class CollectorSkillTest(unittest.TestCase):
 
                 self.assertEqual("success", feedback.outcome)
 
+    def test_success_toast_with_the_second_line_is_not_read_as_failure(self):
+        # 2560x1440 player 2026-10-20: 「召集执行反馈明确失败：升星天赋技能后，
+        # 可获得经验值。 召集带奖励的战场怪物。」, and the map was blocked.
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        cases = (
+            (SUMMON_ACTION, "升星天赋技能后，可获得经验值。 召集带奖励的战场怪物。", "success"),
+            (SUPPRESS_ACTION, "升星天赋技能后，可获得经验值。 已制伏地图内所有怪物。", "success"),
+            (ABSORB_ACTION, "升星天赋技能后，可获得经验值。 吸收周围的拾取物。", "success"),
+            (SUMMON_ACTION, "升星天赋技能后，可获得经验值。 无可召集的战场怪物。", "failure"),
+            (SUPPRESS_ACTION, "没有可制伏的怪物。", "failure"),
+        )
+        for action, text, outcome in cases:
+            with self.subTest(text=text):
+                collector = Collector(
+                    SimpleNamespace(config={}, sleep=lambda *_a: None, info_set=lambda *_a: None),
+                    SimpleNamespace(
+                        capture=lambda: frame,
+                        ocr_text=lambda *_a, _text=text, **_k: _text,
+                        simplify=lambda value: value,
+                    ),
+                    SimpleNamespace(),
+                    SimpleNamespace(),
+                )
+
+                self.assertEqual(outcome, collector._read_action_feedback(action).outcome)
+
     def test_absorb_failure_feedback_has_precedence_over_positive_text(self):
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         collector = Collector(
@@ -1132,7 +1134,8 @@ class CollectorSkillTest(unittest.TestCase):
     def test_dimmed_absorb_and_summon_are_preexisting_used_without_click(self):
         collector, clicks, _statuses, _progress = self._skill_collector(
             {
-                "探查": ActionIconState.AVAILABLE,
+                # 探查 runs: its countdown covers the glyph.
+                "探查": ActionIconState.ABSENT,
                 "吸收": ActionIconState.USED,
                 "召集": ActionIconState.USED,
             },
@@ -2519,6 +2522,48 @@ class EnsureSearchTest(unittest.TestCase):
         self.assertEqual(1, len(collector.pressed))
 
 
+class SearchRunningTest(unittest.TestCase):
+    """Leo 2026-10-19 第三章: 吸收 went first because digits misread over the
+    idle 探查 slot counted as a running 探查."""
+
+    def _collector(self, reads, icon_state):
+        collector = object.__new__(Collector)
+        texts = iter(reads)
+        collector.sleeps = []
+        collector.task = SimpleNamespace(
+            sleep=collector.sleeps.append, log_info=lambda *_a: None
+        )
+        collector._status = lambda *a: None
+        collector.vision = SimpleNamespace(
+            capture=lambda: object(),
+            ocr_text=lambda *_a, **_k: next(texts),
+        )
+        collector.action_icons = SimpleNamespace(
+            detect=lambda *_a: ActionIconDetection(
+                icon_state, MatchResult(0.98, (1, 1), (5, 5))
+            )
+        )
+        return collector
+
+    def test_no_digits_is_not_running(self):
+        self.assertFalse(self._collector([""], ActionIconState.AVAILABLE)._search_running())
+
+    def test_digits_over_a_covered_glyph_run_at_once(self):
+        collector = self._collector(["231"], ActionIconState.ABSENT)
+        self.assertTrue(collector._search_running())
+        self.assertEqual([], collector.sleeps)
+
+    def test_static_digits_over_the_idle_glyph_are_not_running(self):
+        collector = self._collector(["0", "0"], ActionIconState.AVAILABLE)
+        self.assertFalse(collector._search_running())
+        collector = self._collector(["8", "8"], ActionIconState.AVAILABLE)
+        self.assertFalse(collector._search_running())
+
+    def test_ticking_digits_over_a_bright_glyph_still_run(self):
+        collector = self._collector(["87", "86"], ActionIconState.AVAILABLE)
+        self.assertTrue(collector._search_running())
+
+
 class SlotSearchMenuTest(unittest.TestCase):
     """2K 2026-10-07 埃克夏城: the slot press must not demand the 探查 icon."""
 
@@ -2569,6 +2614,68 @@ class EarlierClickTest(unittest.TestCase):
         )
         self.assertIsNone(result)
         self.assertEqual(1, len(voided))
+
+
+    def test_an_unread_icon_lets_the_old_press_go_instead_of_blocking(self):
+        # Leo 2026-10-20 「以遊戲為準」: a 2560x1440 player had ch1-3, 5, 6 all
+        # left 「上次按的技能今天确认不了，今天不再按这张图」.
+        collector, voided = self._collector((3, 21))
+        blocked = []
+        collector.progress.mark_action_blocked = lambda *a, **k: blocked.append(a)
+        result = collector._resume_pending_intent(
+            SUMMON_ACTION,
+            {"state": "blocked", "baseline": [3, 21]},
+            self._detection(ActionIconState.ABSENT),
+            card_id="Q_sp1",
+            map_role=CollectionMapRole.BATTLE_AREA_1,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(1, len(voided))
+        self.assertEqual([], blocked)
+
+
+
+class GameIconOverRecordTest(unittest.TestCase):
+    """Leo 2026-10-20 「以遊戲紀錄為主」: a record calling a skill done never
+    keeps a press from a skill the game still shows bright."""
+
+    def _prepare(self, state, *, second_pass=False):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress = ProgressStore(
+                Path(temp_dir) / "progress.json",
+                lambda: datetime(2026, 10, 20, 12, tzinfo=UTC_PLUS_8),
+            )
+            progress.load()
+            progress.arm_action("Q_sp7", CollectionMapRole.BATTLE_AREA_1, "召集", baseline=(5, 21))
+            progress.mark_action_seen_done("Q_sp7", CollectionMapRole.BATTLE_AREA_1, "召集")
+            collector = object.__new__(Collector)
+            collector.progress = progress
+            collector._status = lambda *a: None
+            collector._report_icon_detection = lambda *a: None
+            collector._records_from_this_visit = second_pass
+            detection = ActionIconDetection(state, MatchResult(0.98, (1, 1), (5, 5)), stable=True)
+            collector._detect_fresh_action_icon = lambda *_a: (None, detection)
+            collector._prepare_before_click = lambda *_a, **_k: ((5, 21), None)
+            early, prepared = collector._prepare_action(
+                SUMMON_ACTION, card_id="Q_sp7", map_role=CollectionMapRole.BATTLE_AREA_1
+            )
+            record = progress.get_action_record("Q_sp7", CollectionMapRole.BATTLE_AREA_1, "召集")
+        return early, prepared, record
+
+    def test_a_bright_icon_is_pressed_although_the_record_says_done(self):
+        early, prepared, record = self._prepare(ActionIconState.AVAILABLE)
+        self.assertIsNone(early)
+        self.assertIsNotNone(prepared)
+        self.assertEqual("void", record["state"])
+
+    def test_a_record_stands_when_the_icon_is_not_bright(self):
+        early, prepared, record = self._prepare(ActionIconState.USED)
+        self.assertTrue(early.completed)
+        self.assertIsNone(prepared)
+
+    def test_the_second_pass_on_the_same_map_keeps_what_it_just_recorded(self):
+        early, _prepared, _record = self._prepare(ActionIconState.AVAILABLE, second_pass=True)
+        self.assertTrue(early.completed)
 
 
 class AlreadyDoneMapTest(unittest.TestCase):
@@ -2737,6 +2844,73 @@ class LowerCountMisreadTest(unittest.TestCase):
         self.assertFalse(result.completed)
 
 
+class SuccessToastIconUnreadTest(unittest.TestCase):
+    """Leo 2026-10-20 (v0.2.2, ch11 战斗区域1): 吸收 showed its success toast
+    「吸收周围的拾取物」 but its icon read "absent" right after the press and
+    the count did not read; the card was skipped as 「吸收执行证据不一致」."""
+
+    def _run(self, post_state, feedback, after=None):
+        from src.tasks.map_trade.collector_constants import SkillFeedbackObservation
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress = ProgressStore(
+                Path(temp_dir) / "progress.json",
+                lambda: datetime(2026, 10, 20, 12, tzinfo=UTC_PLUS_8),
+            )
+            progress.load()
+            role = CollectionMapRole.BATTLE_AREA_1
+            progress.arm_action("Q_sp11", role, "吸收", baseline=(10, 21))
+            progress.mark_action_clicked("Q_sp11", role, "吸收")
+            collector = object.__new__(Collector)
+            collector.progress = progress
+            collector._status = lambda *a: None
+            collector._note_missed_press = lambda *a, **k: False
+
+            def read(action, detection=None, **_k):
+                collector._last_count_window_stable = after is not None
+                return after
+
+            collector._read_count_window = read
+            bright = ActionIconDetection(
+                ActionIconState.AVAILABLE, MatchResult(0.98, (1, 1), (5, 5)), stable=True
+            )
+            post = ActionIconDetection(post_state, MatchResult(0.0, (1, 1), (5, 5)))
+            result = collector._finish_after_click(
+                ABSORB_ACTION,
+                card_id="Q_sp11",
+                map_role=role,
+                before=(10, 21),
+                detection=bright,
+                post_detection=post,
+                feedback=SkillFeedbackObservation(*feedback),
+            )
+            return result, progress.get_action_record("Q_sp11", role, "吸收")
+
+    SUCCESS = ("吸收周围的拾取物。", "success", 1.0, "吸收周围的拾取物")
+
+    def test_success_toast_with_unread_icon_is_done_and_count_checked_later(self):
+        for state in (ActionIconState.ABSENT, ActionIconState.UNKNOWN):
+            result, record = self._run(state, self.SUCCESS)
+            self.assertTrue(result.completed, state)
+            self.assertTrue(record["pending"], state)
+            self.assertEqual(("吸收",), tuple(result.pending_actions))
+
+    def test_still_bright_after_a_success_toast_is_not_done(self):
+        result, _record = self._run(ActionIconState.AVAILABLE, self.SUCCESS)
+        self.assertFalse(result.completed)
+
+    def test_no_toast_and_unread_icon_is_not_done(self):
+        result, _record = self._run(ActionIconState.ABSENT, ("", None, 0.0))
+        self.assertFalse(result.completed)
+
+    def test_failure_toast_is_never_done(self):
+        result, _record = self._run(
+            ActionIconState.ABSENT,
+            ("周围没有可以吸收的拾取物", "failure", 1.0, "周围没有可以吸收的拾取物"),
+        )
+        self.assertFalse(result.completed)
+
+
 class GreyIconTest(unittest.TestCase):
     """Leo 2026-10-07: a grey icon on arrival is done here this week; an old
     unsettled count never stops the map (2K 埃克夏森林深处 stopped the run)."""
@@ -2816,7 +2990,8 @@ class GreyNeedsSearchTest(unittest.TestCase):
 
 
 class GreyAbsorbSkipsMapTest(unittest.TestCase):
-    """Leo 2026-10-07: a grey 吸收 on a battle map skips 召集/压制 too."""
+    """Leo 2026-10-07: a grey 吸收 on a battle map skips 召集 when 召集 is grey
+    too; 压制 is always judged on its own icon (Leo 2026-10-15/16)."""
 
     def _grey_absorb_run(self, summon_grey: bool, card_id: str = "Q_sp12"):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2853,11 +3028,16 @@ class GreyAbsorbSkipsMapTest(unittest.TestCase):
             }
             return prepared, results, states
 
-    def test_grey_absorb_and_grey_summon_skip_suppress(self):
-        prepared, results, states = self._grey_absorb_run(summon_grey=True)
-        self.assertEqual(["吸收", "召集"], prepared)
-        self.assertTrue(all(result.completed for result in results))
-        self.assertEqual(CollectionActionState.SETTLED.value, states["压制"])
+    def test_grey_absorb_and_grey_summon_still_judge_suppress(self):
+        # Leo 2026-10-16: 戏水女王 / 角色卡7 battle areas skipped 压制.
+        prepared, results, _states = self._grey_absorb_run(summon_grey=True)
+        self.assertEqual(["吸收", "召集", "压制"], prepared)
+        self.assertEqual("压制可按", results[-1].message)
+
+    def test_splash_queen_battle_area_presses_suppress(self):
+        prepared, results, _states = self._grey_absorb_run(summon_grey=True, card_id="Q_ep7")
+        self.assertEqual(["吸收", "召集", "压制"], prepared)
+        self.assertEqual("压制可按", results[-1].message)
 
     def test_grey_absorb_with_bright_summon_goes_on(self):
         # Splash Queen's battle map (live 4K 2026-10-09): 吸收 done by hand,

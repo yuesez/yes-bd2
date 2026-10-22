@@ -11,7 +11,6 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from src.utils.wait_limits import LOADING_MAX_SECONDS, STUCK_SECONDS
 from src.tasks.map_trade.models import (
     CARD_BY_ID,
     MERCHANT_CARD_ID,
@@ -57,6 +56,7 @@ from src.tasks.map_trade.navigator import (
     StoryBadgeDetection,
 )
 from src.tasks.map_trade.navigator_constants import (
+    AREA_MAP_BACK_TEMPLATE,
     CHAPTER_HOME_RELATIVE_ROI,
     CHAPTER_HOME_TEMPLATES,
     CLASSIFY_CARD_MENU_CATEGORY_REFERENCE_ROI,
@@ -77,6 +77,7 @@ from src.tasks.map_trade.navigator_constants import (
     MAP_MERCHANT_ICON_TIMEOUT,
     MERCHANT_ARRIVAL_TIMEOUT,
     MERCHANT_NAV_CONFIRM_OCR_ROI,
+    MERCHANT_NAV_GUIDE_REFERENCE_POINT,
     MERCHANT_NAV_GUIDE_TEMPLATE,
     MERCHANT_NAV_GUIDE_TIMEOUT,
     MERCHANT_NAV_LANDMARK_TIMEOUT,
@@ -89,6 +90,8 @@ from src.tasks.map_trade.navigator_constants import (
     MERCHANT_TRAVEL_DIALOG_KEYWORDS,
     MERCHANT_TRAVEL_DIALOG_OCR_ROI,
     MINIMAP_CENTER_REFERENCE,
+    SQUARE_MAP_MERCHANT_ICON_TEMPLATE,
+    SQUARE_MAP_MERCHANT_POINT,
     TRADE_CARD_SANDBOX_HITS,
 )
 from src.tasks.map_trade.progress import UTC_PLUS_8
@@ -126,12 +129,14 @@ from src.tasks.map_trade.trader_constants import (
     SELL_MODE_POINT,
     SHOP_MODE_TITLE_REGION,
 )
+from src.tasks.map_trade.navigator_trade import MERCHANT_BACK_LOOK_SECONDS
 from src.tasks.map_trade.vision import Vision
 from src.tasks.MapTradeTask import MapTradeTask
 from src.utils.calibration import FHD_1080, reference_rect_to_relative_roi
 from src.utils.home_confirmation import HOME_ANNOUNCEMENT_CLEAR_RELATIVE_POINT
 from src.utils.image_utils import relative_roi_frame, scale_reference_roi
 from src.utils.template_resolution import offline_template_scale
+from src.utils.wait_limits import LOADING_MAX_SECONDS, STUCK_SECONDS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -2691,7 +2696,15 @@ class BuyEntryTest(unittest.TestCase):
 
         self.assertIs(merchant, navigator._merchant_prompt_box(frame))
         self.assertEqual([(frame, "商人互动按钮", MERCHANT_PROMPT_OCR_ROI)], ocr_calls)
-        self.assertEqual(r"收集狂大叔", MERCHANT_PROMPT_PATTERN)
+        self.assertEqual(r"收集狂大叔|洛[兹茲]", MERCHANT_PROMPT_PATTERN)
+
+        # 梦幻广场's merchant (live 4K 2026-10-20).
+        for name in ("F 洛兹", "洛兹", "F洛茲"):
+            with self.subTest(name=name):
+                boxes["value"] = [
+                    SimpleNamespace(name=name, x=1000, y=380, width=90, height=40)
+                ]
+                self.assertIs(boxes["value"][0], navigator._merchant_prompt_box(frame))
 
         boxes["value"] = [
             other,
@@ -2872,15 +2885,20 @@ class TradeMerchantNavigationTest(unittest.TestCase):
     def _navigator(self, vision=None, **task_overrides):
         self.warnings = []
         self.sleeps = []
-        task = SimpleNamespace(
-            config={"加载页面等待秒数": 45.0},
-            sleep=self.sleeps.append,
-            log_warning=lambda message, **_kwargs: self.warnings.append(message),
-            info_set=lambda *_args: None,
-            **task_overrides,
-        )
+        self.infos = []
+        defaults = {
+            "config": {"加载页面等待秒数": 45.0},
+            "sleep": self.sleeps.append,
+            "log_warning": lambda message, **_kwargs: self.warnings.append(message),
+            "log_info": lambda message, **_kwargs: self.infos.append(message),
+            "info_set": lambda *_args: None,
+        }
+        defaults.update(task_overrides)
+        task = SimpleNamespace(**defaults)
         navigator = Navigator(task, vision if vision is not None else SimpleNamespace())
         navigator.ensure_small_minimap = lambda: True
+        # The story-card tests below: the square cannot be entered.
+        navigator._enter_square = lambda: NavigationResult(False, ScreenState.HOME, "测试：不进广场")
         return navigator
 
     @staticmethod
@@ -2976,6 +2994,145 @@ class TradeMerchantNavigationTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(ScreenState.SANDBOX, result.state)
         self.assertEqual(MERCHANT_PROMPT_FAILURE_MESSAGE, result.message)
+
+    def test_go_to_trade_merchant_trades_in_the_square_without_the_card(self):
+        events = []
+        navigator = self._navigator(
+            SimpleNamespace(capture=lambda: None),
+            clear_field_followers=lambda: events.append("followers") or "absent",
+        )
+        navigator._merchant_prompt_box = lambda _frame: None
+        navigator._enter_square = lambda: (
+            events.append("square") or NavigationResult(True, ScreenState.SANDBOX, "梦幻广场")
+        )
+        navigator._enter_trade_card = lambda: self.fail("square entered: no story card")
+        navigator._wait_for_merchant_prompt = lambda timeout: events.append("prompt") or False
+        navigator._walk_to_merchant = lambda: events.append("walk") or True
+
+        result = navigator.go_to_trade_merchant()
+
+        self.assertTrue(result.success)
+        self.assertEqual(["square", "followers", "prompt", "walk"], events)
+
+    def test_go_to_trade_merchant_goes_to_the_card_when_the_square_walk_fails(self):
+        events = []
+        navigator = self._navigator(
+            SimpleNamespace(capture=lambda: None),
+            clear_field_followers=lambda: "absent",
+        )
+        navigator._merchant_prompt_box = lambda _frame: None
+        navigator._enter_square = lambda: NavigationResult(True, ScreenState.SANDBOX, "梦幻广场")
+        walks = iter([False, True])
+        navigator._wait_for_merchant_prompt = lambda timeout: False
+        navigator._walk_to_merchant = lambda: events.append("walk") or next(walks)
+        navigator.return_home = lambda: (
+            events.append("home") or NavigationResult(True, ScreenState.HOME, "")
+        )
+        navigator._enter_trade_card = lambda: (
+            events.append("card") or NavigationResult(True, ScreenState.SANDBOX, MERCHANT_CARD_ID)
+        )
+
+        stages = []
+        navigator._status = lambda key, value: stages.append(value) if key == "当前阶段" else None
+
+        self.assertTrue(navigator.go_to_trade_merchant().success)
+        self.assertEqual(["walk", "home", "card", "walk"], events)
+        # The stage names the merchant of the place: 洛兹 in the square.
+        self.assertEqual(["找商人洛兹", "找商人无聊收集狂大叔"], stages)
+        self.assertTrue(any("广场里没走到商人旁" in line for line in self.infos))
+
+    def test_go_to_trade_merchant_falls_back_to_the_card_when_the_square_fails(self):
+        events = []
+        navigator = self._navigator(SimpleNamespace(capture=lambda: None))
+        navigator._merchant_prompt_box = lambda _frame: None
+        navigator._enter_trade_card = lambda: (
+            events.append("card") or NavigationResult(True, ScreenState.SANDBOX, MERCHANT_CARD_ID)
+        )
+        navigator._wait_for_merchant_prompt = lambda timeout: True
+
+        self.assertTrue(navigator.go_to_trade_merchant().success)
+        self.assertEqual(["card"], events)
+        self.assertTrue(any("剧情游戏卡1" in line for line in self.infos))
+
+    def _square_navigator(self, landings, recent_is_pvp=False, menu_ok=True, page_left=True):
+        events = []
+        navigator = self._navigator(
+            SimpleNamespace(capture=lambda: None),
+            operate_click=lambda *point, **_k: events.append(("click", point)),
+            _recent_cartridge_is_pvp=lambda: recent_is_pvp,
+        )
+        del navigator._enter_square
+        navigator.return_home = lambda: (
+            events.append("home") or NavigationResult(True, ScreenState.HOME, "")
+        )
+        navigator._open_story_quick_switcher = lambda category: (
+            events.append(("switch", category))
+            or NavigationResult(menu_ok, ScreenState.CARD_MENU, "")
+        )
+        navigator._wait_for_ocr_keywords = lambda *_a, **_k: not page_left
+        landings = list(landings)
+        navigator._wait_for_field_or_square = lambda: landings.pop(0)
+        navigator.classify = lambda *_a: ScreenState.UNKNOWN
+        return navigator, events
+
+    def test_enter_square_uses_the_recent_cartridge_when_it_is_the_square(self):
+        from src.tasks.BaseBD2Task import CARTRIDGE_RECENT_ENTRY_POINT
+        from src.tasks.map_trade.navigator_trade import SQUARE_ARRIVED
+
+        navigator, events = self._square_navigator([SQUARE_ARRIVED])
+        self.assertTrue(navigator._enter_square().success)
+        self.assertEqual(["home", ("click", CARTRIDGE_RECENT_ENTRY_POINT)], events)
+
+    def test_enter_square_switches_to_life_slot_two_from_another_field(self):
+        from src.tasks.BaseBD2Task import CARTRIDGE_RECENT_ENTRY_POINT
+        from src.tasks.map_trade.navigator_trade import SQUARE_ARRIVED, SQUARE_OTHER_FIELD
+        from src.utils.fantasia_square import SQUARE_CARTRIDGE_SLOT_POINT
+
+        navigator, events = self._square_navigator([SQUARE_OTHER_FIELD, SQUARE_ARRIVED])
+        self.assertTrue(navigator._enter_square().success)
+        self.assertEqual(
+            [
+                "home",
+                ("click", CARTRIDGE_RECENT_ENTRY_POINT),
+                "home",
+                ("switch", "life"),
+                ("click", SQUARE_CARTRIDGE_SLOT_POINT),
+            ],
+            events,
+        )
+
+    def test_enter_square_clicks_the_square_card_where_its_picture_is(self):
+        # v0.1.42 summary 2026-10-15: slot 2 of a player's row opened 格鲁菲餐厅.
+        from pathlib import Path
+
+        import cv2
+
+        from src.tasks.map_trade.navigator_trade import SQUARE_ARRIVED
+
+        row = cv2.imread(
+            str(Path(__file__).resolve().parent / "fixtures" / "quick_switch" / "life_gameplay_selected_fhd.png")
+        )
+        swapped = row.copy()
+        swapped[920:1030, 80:220] = row[920:1030, 260:400]
+        swapped[920:1030, 260:400] = row[920:1030, 80:220]
+        navigator, events = self._square_navigator([SQUARE_ARRIVED], recent_is_pvp=True)
+        navigator.vision = SimpleNamespace(capture=lambda: swapped)
+
+        self.assertTrue(navigator._enter_square().success)
+        (_click, point) = events[-1]
+        self.assertAlmostEqual(149 / 1920, point[0], delta=0.01)
+
+    def test_enter_square_never_presses_a_pvp_recent_cartridge_and_repeats_a_dropped_card(self):
+        from src.tasks.map_trade.navigator_trade import SQUARE_CARD_REPRESSES
+        from src.utils.fantasia_square import SQUARE_CARTRIDGE_SLOT_POINT
+
+        navigator, events = self._square_navigator([None], recent_is_pvp=True, page_left=False)
+        result = navigator._enter_square()
+        self.assertFalse(result.success)
+        self.assertEqual(["home", ("switch", "life")], events[:2])
+        self.assertEqual(
+            [("click", SQUARE_CARTRIDGE_SLOT_POINT)] * (1 + SQUARE_CARD_REPRESSES), events[2:]
+        )
 
     def test_wait_for_merchant_prompt_polls_until_prompt_or_timeout(self):
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
@@ -3154,16 +3311,61 @@ class TradeMerchantNavigationTest(unittest.TestCase):
         )
         return self._navigator(vision)
 
-    def test_walk_to_merchant_fails_without_ocr_when_guide_button_missing(self):
+    def _guide_missing_navigator(self, *, in_field: bool):
         navigator = self._walk_navigator(guide=False)
+        navigator.vision.capture = lambda: "frame"
+        navigator.vision.match = lambda _frame, _spec: None
+        navigator.vision.passes = lambda _result, _spec: False
+        navigator.vision.click_reference = lambda x, y, after_sleep: self.events.append(
+            ("reference", (x, y))
+        )
+        navigator.classify = lambda _frame=None: (
+            ScreenState.SANDBOX if in_field else ScreenState.UNKNOWN
+        )
+        return navigator
+
+    def test_walk_to_merchant_fails_without_ocr_when_guide_button_missing(self):
+        navigator = self._guide_missing_navigator(in_field=False)
         navigator._confirm_travel = lambda: self.fail("no travel without the guide menu")
+        navigator._walk_via_area_map = lambda: self.events.append("area_map") or False
 
         self.assertFalse(navigator._walk_to_merchant())
         self.assertEqual(
-            [("template", MERCHANT_NAV_GUIDE_TEMPLATE, MERCHANT_NAV_GUIDE_TIMEOUT)],
+            [("template", MERCHANT_NAV_GUIDE_TEMPLATE, MERCHANT_NAV_GUIDE_TIMEOUT), "area_map"],
             self.events,
         )
         self.assertTrue(self.warnings)
+
+    def test_walk_to_merchant_uses_the_area_map_when_the_guide_button_is_missing(self):
+        # Leo's 2K 一键日常 10-17 (v0.1.42): 买 failed with the merchant
+        # prompt unread; the ≡ button had no second way.
+        navigator = self._guide_missing_navigator(in_field=False)
+        navigator._confirm_travel = lambda: self.fail("no travel without the guide menu")
+        navigator._walk_via_area_map = lambda: self.events.append("area_map") or True
+        waits = []
+        navigator._wait_for_merchant_prompt = lambda timeout: waits.append(timeout) or True
+
+        self.assertTrue(navigator._walk_to_merchant())
+        self.assertEqual(["area_map"], self.events[1:])
+        self.assertEqual([MERCHANT_ARRIVAL_TIMEOUT], waits)  # no second area-map walk
+
+    def test_walk_to_merchant_presses_guide_place_when_field_is_confirmed(self):
+        # 2K 桌面分身 2026-10-16: the guide template read -1.000 all run while
+        # the quick-switch button passed; 跑商 never reached the merchant.
+        navigator = self._guide_missing_navigator(in_field=True)
+        navigator._confirm_travel = lambda: self.events.append("confirm_travel") or "moving"
+        navigator._wait_for_merchant_prompt = lambda timeout: True
+
+        self.assertTrue(navigator._walk_to_merchant())
+        self.assertEqual(
+            [
+                ("template", MERCHANT_NAV_GUIDE_TEMPLATE, MERCHANT_NAV_GUIDE_TIMEOUT),
+                ("reference", MERCHANT_NAV_GUIDE_REFERENCE_POINT),
+                ("ocr", ("商店",), MERCHANT_NAV_MENU_OCR_ROI, "商店导航"),
+                "confirm_travel",
+            ],
+            self.events,
+        )
 
     def test_walk_to_merchant_teleports_via_shop_destination_then_waits_for_prompt(self):
         navigator = self._walk_navigator()
@@ -3227,14 +3429,29 @@ class TradeMerchantNavigationTest(unittest.TestCase):
         prompts = iter([False, True])
         navigator._wait_for_merchant_prompt = lambda _timeout: next(prompts)
         navigator.classify = lambda: ScreenState.SANDBOX
+        navigator._in_square_now = lambda: False
         walked = []
         navigator._walk_via_area_map = lambda: walked.append(1) or True
         self.assertTrue(navigator._walk_to_merchant())
         self.assertEqual([1], walked)
 
-    def test_walk_to_merchant_stops_when_shop_destination_missing(self):
+    def test_square_trip_with_unread_prompt_talks_with_f_without_the_map(self):
+        # Live 1080p 2026-10-20: another player's name sat over 「F 洛兹」 and
+        # the square's map has no merchant icon.
+        navigator = self._walk_navigator()
+        navigator._confirm_travel = lambda: "moving"
+        navigator._wait_for_merchant_prompt = lambda _timeout: False
+        navigator.classify = lambda: ScreenState.SANDBOX
+        navigator._in_square_now = lambda: True
+        navigator._walk_via_area_map = lambda: self.fail("the square's map has no merchant icon")
+        self.assertTrue(navigator._walk_to_merchant())
+        self.assertTrue(navigator._merchant_prompt_unread)
+
+    def test_walk_to_merchant_uses_the_area_map_when_shop_destination_missing(self):
+        # Leo 2026-10-20 「讀不到也要有備案」: 商店 unread in the ≡ list.
         navigator = self._walk_navigator(destination=False)
         navigator._confirm_travel = lambda: self.fail("no travel without the 商店 destination")
+        navigator._walk_via_area_map = lambda: self.events.append("area_map") or False
 
         with patch(
             "src.tasks.map_trade.navigator_trade.monotonic",
@@ -3243,7 +3460,32 @@ class TradeMerchantNavigationTest(unittest.TestCase):
             self.assertFalse(navigator._walk_to_merchant())
         ocr_names = [event[3] for event in self.events if event[0] == "ocr"]
         self.assertEqual(["商店导航"], ocr_names)
+        self.assertEqual("area_map", self.events[-1])
         self.assertTrue(self.warnings)
+
+    def test_unread_prompt_after_the_trip_talks_with_f(self):
+        # Leo 2026-10-20 「點不到商人怎麼辦」.
+        navigator = self._walk_navigator()
+        navigator._confirm_travel = lambda: "moving"
+        navigator._wait_for_merchant_prompt = lambda _timeout: False
+        navigator.classify = lambda: ScreenState.SANDBOX
+        navigator._in_square_now = lambda: False
+        navigator._walk_via_area_map = lambda: True
+
+        self.assertTrue(navigator._walk_to_merchant())
+        self.assertTrue(navigator._merchant_prompt_unread)
+
+        keys = []
+        navigator.task.tap_key = lambda key, after_sleep=0.0: keys.append(key) or True
+        navigator._click_merchant_interaction = lambda *_a, **_k: False
+        self.assertTrue(navigator._enter_q_sp6_shop(1.0, log_timeout=True))
+        self.assertEqual(["F"], keys)
+
+    def test_unread_prompt_never_sends_f_when_the_trip_was_not_made(self):
+        navigator = self._walk_navigator()
+        navigator.task.tap_key = lambda *_a, **_k: self.fail("no F away from the merchant")
+        navigator._click_merchant_interaction = lambda *_a, **_k: False
+        self.assertFalse(navigator._enter_q_sp6_shop(1.0, log_timeout=False))
 
     # _confirm_travel ------------------------------------------------------
 
@@ -3319,6 +3561,7 @@ class TradeMerchantNavigationTest(unittest.TestCase):
             vision,
             operate_click=lambda x, y, after_sleep=0: events.append(("click", x, y, after_sleep)),
         )
+        navigator._area_map_open = lambda _seconds: "map"
         navigator._confirm_travel = lambda: events.append("confirm_travel") or "moving"
 
         self.assertTrue(navigator._walk_via_area_map())
@@ -3337,12 +3580,67 @@ class TradeMerchantNavigationTest(unittest.TestCase):
         )
 
     def test_walk_via_area_map_fails_when_merchant_icon_is_missing(self):
-        vision = SimpleNamespace(click_template=lambda *_args, **_kwargs: False)
+        looked = []
+        vision = SimpleNamespace(
+            click_template=lambda spec, *_args, **_kwargs: looked.append(spec) or False
+        )
         navigator = self._navigator(vision, operate_click=lambda *_args, **_kwargs: None)
+        navigator._area_map_open = lambda _seconds: "map"
         navigator._confirm_travel = lambda: self.fail("no travel without the merchant icon")
 
         self.assertFalse(navigator._walk_via_area_map())
         self.assertTrue(self.warnings)
+        # Both icons, then the map's back arrow.
+        self.assertEqual(
+            [MAP_MERCHANT_ICON_TEMPLATE, SQUARE_MAP_MERCHANT_ICON_TEMPLATE, AREA_MAP_BACK_TEMPLATE],
+            looked,
+        )
+
+    def test_walk_via_area_map_presses_the_squares_remembered_icon_place(self):
+        clicks = []
+        vision = SimpleNamespace(click_template=lambda *_args, **_kwargs: False)
+        navigator = self._navigator(
+            vision, operate_click=lambda x, y, after_sleep=0: clicks.append((x, y))
+        )
+        navigator._area_map_open = lambda _seconds: "square"
+        navigator._confirm_travel = lambda: "moving"
+
+        self.assertTrue(navigator._walk_via_area_map())
+        x, y = SQUARE_MAP_MERCHANT_POINT
+        self.assertEqual((x / 1920, y / 1080), clicks[-1])
+
+    def test_walk_via_area_map_opens_the_map_with_m_when_the_minimap_press_fails(self):
+        keys = []
+        opened = iter([None, "square"])
+        vision = SimpleNamespace(click_template=lambda spec, *_a, **_k: True)
+        navigator = self._navigator(
+            vision,
+            operate_click=lambda *_a, **_k: None,
+            tap_key=lambda key, after_sleep=0.0: keys.append(key) or True,
+        )
+        navigator._area_map_open = lambda _seconds: next(opened)
+        navigator._confirm_travel = lambda: "moving"
+
+        self.assertTrue(navigator._walk_via_area_map())
+        self.assertEqual(["M"], keys)
+
+    def test_square_map_merchant_icon_matches_leos_frame(self):
+        frame = cv2.imread(str(ROOT / "tests" / "fixtures" / "square" / "square_area_map_2k.jpg"))
+        vision = Vision(SimpleNamespace(config={}, vision_threshold_key="跑图跑商识图阈值"))
+        result = vision.match(frame, SQUARE_MAP_MERCHANT_ICON_TEMPLATE)
+        self.assertTrue(vision.passes(result, SQUARE_MAP_MERCHANT_ICON_TEMPLATE))
+        x, y = SQUARE_MAP_MERCHANT_POINT
+        cx = (result.position[0] + result.size[0] / 2) * 1920 / frame.shape[1]
+        cy = (result.position[1] + result.size[1] / 2) * 1080 / frame.shape[0]
+        self.assertLess(abs(cx - x), 15)
+        self.assertLess(abs(cy - y), 15)
+        field = cv2.imread(
+            str(ROOT / "tests" / "fixtures" / "square" / "square_field_nav_menu_2k.jpg")
+        )
+        self.assertFalse(
+            vision.passes(vision.match(field, SQUARE_MAP_MERCHANT_ICON_TEMPLATE),
+                          SQUARE_MAP_MERCHANT_ICON_TEMPLATE)
+        )
 
 
 class BuyPhaseAndClassifyTest(unittest.TestCase):
@@ -3553,7 +3851,7 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
             enter_q_sp6_buy_flow=lambda **_kw: NavigationResult(True, ScreenState.SHOP)
         )
         trader.rebuild_favorites = lambda: actions.append(("rebuild",)) or True
-        trader.buy_all_favorites = lambda: actions.append(("buy-all",)) or True
+        trader.buy_all_favorites = lambda **_k: actions.append(("buy-all",)) or True
         trader._wait_for_buy_all_favorites_state = lambda: (
             (1454, 1004), np.zeros((1080, 1920, 3), dtype=np.uint8)
         )
@@ -3638,7 +3936,7 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
                     enter_q_sp6_buy_flow=lambda **_kw: NavigationResult(True, ScreenState.SHOP)
                 )
                 trader.rebuild_favorites = lambda: self.fail("售罄后不应切卡重建收藏")
-                trader.buy_all_favorites = lambda: self.fail("售罄后不应继续购买")
+                trader.buy_all_favorites = lambda **_k: self.fail("售罄后不应继续购买")
                 trader.vision = SimpleNamespace(
                     capture=lambda: frame,
                     ocr_boxes=lambda *_args: [
@@ -3668,6 +3966,8 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
 
     def test_a_failed_buy_still_sells_from_home(self):
         # Audit #14: a failed 买 or 料理 stopped the day's 120% sale too.
+        # 料理 still runs first: skipping it let 卖 sell the ingredients
+        # uncooked (player, 2026-10-19).
         actions = []
         statuses = {}
         task = self._phase_task(statuses, actions)
@@ -3676,7 +3976,6 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
         )
         phases = (
             ("买", "买", lambda: actions.append("buy") or False),
-            # 料理 cooks what 买 bought today: not without it.
             ("制作料理", "制作料理", lambda: actions.append("cook") or True),
             ("卖", "卖", lambda: actions.append("sell") or True),
         )
@@ -3684,10 +3983,9 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
         self.assertFalse(
             task._run_phases(navigator, phases, after_home=lambda: actions.append("left shop"))
         )
-        self.assertEqual(["buy", "home", "left shop", "sell", "home"], actions)
+        self.assertEqual(["buy", "home", "left shop", "cook", "sell", "home"], actions)
         self.assertEqual("买", statuses["失败"])
-        self.assertEqual("卖", statuses["完成"])
-        self.assertEqual("制作料理", statuses["跳过"])
+        self.assertEqual("制作料理、卖", statuses["完成"])
         self.assertEqual("跑商部分流程未完成。", statuses["状态"])
 
     def test_a_failed_or_broken_cooking_still_sells(self):
@@ -3758,7 +4056,85 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
         self.assertEqual(["买", "制作料理", "卖"], seen["phases"])
         seen["after_home"]()
         self.assertFalse(trader._buy_completed_in_current_shop)
-        self.assertEqual({"制作料理": "买"}, MapTradeTask.phase_needs)
+        self.assertEqual({}, MapTradeTask.phase_needs)
+
+    def test_a_failed_buy_is_tried_once_more_from_home(self):
+        # Leo 2026-10-19 「確保買到」.
+        from src.tasks.map_trade.phase_ledger import PhaseLedger
+
+        with TemporaryDirectory() as folder:
+            buys = iter((False, True))
+            calls = []
+            trader = object.__new__(Trader)
+            trader.run_buy = lambda: calls.append("buy") or next(buys)
+            trader.run_cooking = lambda: calls.append("cook") or True
+            trader.run_sell = lambda: True
+            trader.left_shop = lambda: calls.append("left shop")
+            task = object.__new__(MapTradeTask)
+            task.config = {"启用": True}
+            task.log_info = lambda *_a, **_k: None
+            task.log_warning = lambda *_a, **_k: None
+            task._return_home_after_phases = lambda _navigator: calls.append("home") or True
+            outcomes = {}
+
+            def run_phases(_navigator, phases, after_home=None):
+                for name, _key, action in phases:
+                    outcomes[name] = action()
+                return True
+
+            task._run_phases = run_phases
+            ledger = PhaseLedger(Path(folder) / "phases.json")
+            with (
+                patch("src.tasks.MapTradeTask.Vision"),
+                patch("src.tasks.MapTradeTask.Navigator"),
+                patch("src.tasks.MapTradeTask.ProgressStore"),
+                patch("src.tasks.MapTradeTask.PhaseLedger", return_value=ledger),
+                patch("src.tasks.MapTradeTask.Trader", return_value=trader),
+            ):
+                task.run()
+            self.assertEqual(["buy", "home", "left shop", "buy", "cook"], calls)
+            self.assertTrue(outcomes["买"])
+            self.assertTrue(ledger.done("制作料理"))
+
+    def test_cooking_after_a_failed_buy_is_not_recorded_as_done(self):
+        from src.tasks.map_trade.phase_ledger import PhaseLedger
+
+        with TemporaryDirectory() as folder:
+            ledger = PhaseLedger(Path(folder) / "phases.json")
+            trader = object.__new__(Trader)
+            trader.run_buy = lambda: False
+            trader.run_cooking = lambda: True
+            trader.run_sell = lambda: True
+            trader.left_shop = lambda: None
+            task = object.__new__(MapTradeTask)
+            task.config = {"启用": True}
+            task.log_info = lambda *_a, **_k: None
+            task.log_warning = lambda *_a, **_k: None
+            task._return_home_after_phases = lambda _navigator: True
+            outcomes = {}
+
+            def run_phases(_navigator, phases, after_home=None):
+                for name, _key, action in phases:
+                    outcomes[name] = action()
+                return True
+
+            task._run_phases = run_phases
+            with (
+                patch("src.tasks.MapTradeTask.Vision"),
+                patch("src.tasks.MapTradeTask.Navigator"),
+                patch("src.tasks.MapTradeTask.ProgressStore"),
+                patch("src.tasks.MapTradeTask.PhaseLedger", return_value=ledger),
+                patch("src.tasks.MapTradeTask.Trader", return_value=trader),
+            ):
+                task.run()
+                self.assertTrue(outcomes["制作料理"].success)
+                self.assertFalse(ledger.done("制作料理"))
+                self.assertTrue(ledger.done("卖"))
+                # The retry buys: now 料理 counts.
+                trader.run_buy = lambda: True
+                task.run()
+                self.assertTrue(ledger.done("买"))
+                self.assertTrue(ledger.done("制作料理"))
 
     def test_successful_phases_emit_standalone_completion_notification(self):
         actions = []
@@ -3855,8 +4231,8 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
                 (point, shape, after_sleep)
             )
         )
-        trader._wait_for_buy_all_favorites_state = lambda: ((1454, 1004), frame)
-        trader._wait_for_purchase_confirmation = lambda: True
+        trader._wait_for_buy_all_favorites_state = lambda *_a: ((1454, 1004), frame)
+        trader._wait_for_purchase_confirmation = lambda *_a, **_k: True
         trader._wait_purchase_dialog_closed = lambda: True
 
         self.assertTrue(trader.buy_all_favorites())
@@ -3970,7 +4346,7 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
                     passes=lambda result, _spec: result.score == 1.0,
                     click_client=lambda *_args, **_kwargs: clicks.append("buy"),
                 )
-                trader._wait_for_purchase_confirmation = lambda: True
+                trader._wait_for_purchase_confirmation = lambda *_a, **_k: True
                 trader._wait_purchase_dialog_closed = lambda: True
 
                 self.assertTrue(trader.buy_all_favorites())
@@ -4024,14 +4400,16 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
                 (point, shape, after_sleep)
             )
         )
-        trader._wait_for_buy_all_favorites_state = lambda: ((969, 669), frame)
-        trader._wait_for_purchase_confirmation = lambda: False
+        trader._wait_for_buy_all_favorites_state = lambda *_a: ((969, 669), frame)
+        trader._wait_for_purchase_confirmation = lambda *_a, **_k: False
+        trader._purchase_dialog_partly_read = lambda: False
+        trader._sold_out_after_buy = lambda: False
 
         self.assertFalse(trader.buy_all_favorites())
-        self.assertEqual([((969, 669), frame.shape, 0.3)], clicks)
+        # Pressed once more after the first press opened nothing, then 确认
+        # at its place; nothing shows 售罄, so the buy failed.
         self.assertEqual(
-            ["买：点击一键购买全部收藏后，未同时识别到确认标题和询问文字。"],
-            warnings,
+            [((969, 669), frame.shape, 0.3)] * 2 + [(1045 / 1920, 697 / 1080, 0.8)], clicks
         )
 
     def test_buy_home_confirmation_requires_keyword_votes_brightness_and_ocr(self):
@@ -4609,7 +4987,8 @@ class BuyPhaseAndClassifyTest(unittest.TestCase):
         with patch("src.tasks.map_trade.navigator_trade.monotonic", lambda: clock[0]):
             navigator._return_home_pass()
         self.assertEqual([("popup", SALE_CLOSE_POINT), ("shop",)], actions)
-        self.assertEqual(2 * SALE_OCR_INTERVAL, clock[0])
+        # The sale popup's two looks, then the merchant menu looked for.
+        self.assertAlmostEqual(2 * SALE_OCR_INTERVAL + MERCHANT_BACK_LOOK_SECONDS, clock[0], places=6)
 
     def test_return_home_stops_if_sale_popup_close_is_unconfirmed(self):
         for after_click in ("姜黄 拥有54个 可购买54个 出售", ""):

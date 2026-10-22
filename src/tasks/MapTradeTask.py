@@ -13,7 +13,7 @@ from src.tasks.BaseBD2Task import BaseBD2Task
 from src.tasks.map_trade import trade_detail
 from src.tasks.map_trade.models import OPTIONAL_COOKING_RECIPES
 from src.tasks.map_trade.navigator import Navigator
-from src.tasks.map_trade.phase_ledger import ONLY_INCOMPLETE_KEY, PhaseLedger
+from src.tasks.map_trade.phase_ledger import ONLY_INCOMPLETE_KEY, PhaseDeferred, PhaseLedger
 from src.tasks.map_trade.progress import ProgressStore
 from src.tasks.map_trade.sale_days import (
     bundled_sale_days,
@@ -24,6 +24,7 @@ from src.tasks.map_trade.sale_days import (
 from src.tasks.map_trade.trader import Trader
 from src.tasks.map_trade.trader_cooking import MAIN_COOKING_RECIPES
 from src.tasks.map_trade.vision import Vision
+from src.utils.frozen_screen import FROZEN_SCREEN_SECONDS, FrozenScreen, FrozenWatch
 from src.utils.wait_limits import LOADING_MAX_SECONDS
 
 LEGACY_VISION_THRESHOLD_KEY = "跑图跑商识图阈值"
@@ -147,6 +148,20 @@ class MapAutomationTaskBase(BaseBD2Task):
                         self._save_diagnostic(f"{self.diagnostic_prefix}_{name}_failed")
                 except (TaskDisabledException, FinishedException):
                     raise
+                except FrozenScreen as exc:
+                    # The stuck guard fired inside a phase.  Caught as a plain
+                    # error it gave the 问题摘要 「买：」 with no reason, and the
+                    # fired watch failed every later phase (a player's 1080p
+                    # run, 2026-10-16).  Say why, start the watch over, go on.
+                    why = str(exc) or (
+                        f"画面 {FROZEN_SCREEN_SECONDS:.0f} 秒没有变化（点了没反应或认不出画面）"
+                    )
+                    if getattr(self, "_frozen_watch", None) is not None:
+                        self._frozen_watch = FrozenWatch()
+                    failed.append(name)
+                    self._note_phase_problem("fail", f"{name}：{why}")
+                    self.log_warning(f"{name}：{why}。")
+                    self._save_diagnostic(f"{self.diagnostic_prefix}_{name}_frozen")
                 except Exception as exc:
                     failed.append(name)
                     self._note_phase_problem("error", f"{name}：{exc}")
@@ -235,7 +250,9 @@ class MapTradeTask(MapAutomationTaskBase):
     ocr_threshold_key = TRADE_OCR_THRESHOLD_KEY
     task_log_name = "跑商"
     diagnostic_prefix = "map_trade"
-    phase_needs = {"制作料理": "买"}
+    # 料理 runs even when 买 failed: the bag still holds earlier ingredients,
+    # and skipping it let 卖 sell them uncooked (player, 2026-10-19).  Dishes
+    # without enough ingredients are grey and skipped anyway.
     status_keys = [
         "启用",
         "状态",
@@ -294,7 +311,7 @@ class MapTradeTask(MapAutomationTaskBase):
                 "料理清单": "要制作的料理（全部选择 MAX）；取消勾选的不做。街头烤鸡肉串总在最后。",
                 "5星料理": "额外制作的白框五道料理，默认不选；街头烤鸡肉串始终最后制作。",
                 "买": (
-                    "按每日08:00库存批次到第一章商人无聊收集狂大叔处砍价，"
+                    "按每日08:00库存批次到梦幻广场的商人洛兹处砍价（进不了广场时改去第一章商人无聊收集狂大叔），"
                     "然后直接按「一键购买全部收藏」，买游戏里已收藏的商品。"
                 ),
                 "卖": (
@@ -372,9 +389,39 @@ class MapTradeTask(MapAutomationTaskBase):
         ledger = PhaseLedger()
         skip_done = bool(self.config.get(ONLY_INCOMPLETE_KEY, False))
         # Buy first so today's ingredients are cooked today (user, 2026-09-28).
+        bought = {"ok": True}
+
+        def buy():
+            bought["ok"] = False
+            try:
+                result = trader.run_buy()
+            except FrozenScreen as exc:
+                self.log_warning(f"买：{exc or '画面卡住'}。")
+                if getattr(self, "_frozen_watch", None) is not None:
+                    self._frozen_watch = FrozenWatch()
+                result = False
+            if not bool(getattr(result, "success", result)):
+                # Make sure the day's stock is bought (Leo 2026-10-19 「確保買到」):
+                # once more from home.  A purchase that went through shows
+                # 售罄 and is not bought again.
+                self.log_info("买：没有成功，回主页再买一次。")
+                if self._return_home_after_phases(navigator):
+                    trader.left_shop()
+                    result = trader.run_buy()
+            bought["ok"] = bool(getattr(result, "success", result))
+            return result
+
+        def cook():
+            # 买 failed: cook what the bag holds before 卖, but do not record
+            # 料理 as done, so the retry that buys also cooks the new stock.
+            result = trader.run_cooking()
+            if bought["ok"] or not bool(getattr(result, "success", result)):
+                return result
+            return PhaseDeferred("买没有成功，先用现有材料做了料理；补买后会再做一次。")
+
         steps = (
-            ("买", trader.run_buy),
-            ("制作料理", trader.run_cooking),
+            ("买", buy),
+            ("制作料理", cook),
             ("卖", trader.run_sell),
         )
         phases = tuple(

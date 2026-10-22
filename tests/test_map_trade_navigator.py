@@ -18,6 +18,7 @@ from src.tasks.map_trade.models import (
     NavigationResult,
     ScreenState,
 )
+from src.tasks.map_trade.navigator_sandbox import NOT_BY_CIRCLE_MESSAGE
 from src.tasks.map_trade.navigator import (
     Navigator,
 )
@@ -443,7 +444,7 @@ class NavigatorTest(unittest.TestCase):
             left=True,
         )
         navigator._wait_for_collection_teleport_map = lambda _card: initial
-        navigator._move_area_map = lambda _card, _context, direction: (
+        navigator._move_area_map = lambda _card, _context, direction, **_k: (
             moves.append(direction) or next(contexts)
         )
         navigator._wait_for_story_sandbox = lambda number: NavigationResult(
@@ -498,7 +499,7 @@ class NavigatorTest(unittest.TestCase):
             right=True,
             page_mode=MapPageMode.GENERATE_TELEPORT,
         )
-        navigator._move_area_map = lambda _card, _context, direction: (
+        navigator._move_area_map = lambda _card, _context, direction, **_k: (
             moves.append(direction)
             or self._area_context(
                 target.title,
@@ -558,13 +559,76 @@ class NavigatorTest(unittest.TestCase):
         self.assertEqual([True], opened)
         self.assertIn("无传送阵", result.message)
 
+    def test_map_without_a_circle_is_reached_through_its_walk_neighbour(self):
+        # Leo 2026-10-20: ch14 with 左侧回廊 already done went town -> 中央回廊
+        # by the teleport map (「未识别到传送阵地图传送阵」) and was skipped.
+        for card_id in ("Q_sp14", "Q_sp6", "Q_cp3"):
+            with self.subTest(card=card_id):
+                card = CARD_BY_ID[card_id]
+                main, middle, last = card.targets
+                legs = []
+                navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+                navigator._status = lambda *_args: None
+                navigator._travel_via_nav_menu = lambda *_entries: None
+
+                def teleport(*_args, legs=legs):
+                    legs.append("teleport")
+                    return NavigationResult(False, ScreenState.SANDBOX, "stop")
+
+                navigator._open_teleport_map_anywhere = teleport
+                original = navigator.advance_collection_map
+
+                def advance(cid, current, target, legs=legs, original=original):
+                    if target.key == middle.key:
+                        legs.append(("teleport", current.key, target.key))
+                        return NavigationResult(True, ScreenState.SANDBOX, "")
+                    return original(cid, current, target)
+
+                navigator.advance_collection_map = advance
+                navigator._walk_to_collection_map = lambda _card, here, there, legs=legs: (
+                    legs.append(("walk", here.key, there.key))
+                    or NavigationResult(True, ScreenState.SANDBOX, "")
+                )
+
+                result = navigator.advance_collection_map(card_id, main, last)
+
+                self.assertTrue(result.success)
+                self.assertEqual(
+                    [
+                        ("teleport", main.key, middle.key),
+                        ("walk", middle.key, last.key),
+                    ],
+                    legs,
+                )
+
+    def test_failed_neighbour_leg_names_both_maps(self):
+        card = CARD_BY_ID["Q_sp14"]
+        main, middle, last = card.targets
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        navigator._status = lambda *_args: None
+        navigator._open_teleport_map_anywhere = lambda *_args: NavigationResult(
+            False, ScreenState.SANDBOX, "无传送阵"
+        )
+        navigator._walk_to_collection_map = lambda *_a: self.fail("walked without arriving")
+
+        result = navigator.advance_collection_map(card.card_id, main, last)
+
+        self.assertFalse(result.success)
+        self.assertIn(middle.title, result.message)
+        self.assertIn(last.title, result.message)
+
+    def test_map_with_a_circle_still_uses_the_teleport_map(self):
+        card = CARD_BY_ID["Q_sp14"]
+        main, middle, _last = card.targets
+        self.assertIsNone(Navigator._walk_neighbour(card, main, middle))
+
     @staticmethod
     def _menu_navigator(reads):
         """A navigator whose ≡ menu OCR returns ``reads`` one after another."""
 
         reads = iter(reads)
 
-        def boxes(_frame, _name, _roi):
+        def boxes(_frame, _name, _roi, **_kwargs):
             return [
                 SimpleNamespace(name=text, x=300, y=100 + 60 * row, width=80, height=30)
                 for row, text in enumerate(next(reads))
@@ -604,8 +668,38 @@ class NavigatorTest(unittest.TestCase):
 
         self.assertEqual("狩猎场", entry)
 
+    def test_nav_menu_takes_hunting_ground_with_one_character_misread(self):
+        menu = ["旅馆", "狩猎扬", "快速狩猎", "艾琳"]
+        navigator = self._menu_navigator([menu, menu])
+
+        entry, point, _shape = navigator._nav_menu_choice(("狩猎场", "艾琳"))
+
+        self.assertEqual("狩猎场", entry)
+        self.assertEqual((340, 175), point)
+
+    def test_nav_menu_is_read_at_twice_the_size_before_giving_up(self):
+        reads = []
+
+        def boxes(_frame, _name, _roi, ocr_scale=1.0):
+            reads.append(ocr_scale)
+            text = "狩猎场" if ocr_scale == 2.0 else "狩"
+            return [SimpleNamespace(name=text, x=300, y=100, width=80, height=30)]
+
+        vision = SimpleNamespace(
+            capture=lambda: np.zeros((1080, 1920, 3), np.uint8),
+            ocr_boxes=boxes,
+            simplify=lambda text: text,
+        )
+        navigator = Navigator(SimpleNamespace(sleep=lambda *_a: None), vision)
+        with patch("src.tasks.map_trade.navigator_sandbox.MERCHANT_NAV_MENU_OCR_TIMEOUT", 0.0):
+            entry, _point, _shape = navigator._nav_menu_choice(("狩猎场", "艾琳"))
+
+        self.assertEqual("狩猎场", entry)
+        self.assertEqual([1.0, 2.0], reads)
+
     def test_nav_menu_without_either_entry_gives_up(self):
-        navigator = self._menu_navigator([["旅馆", "商店"]])
+        # Read at 1× and once more at 2×.
+        navigator = self._menu_navigator([["旅馆", "商店"], ["旅馆", "商店"]])
 
         with patch("src.tasks.map_trade.navigator_sandbox.MERCHANT_NAV_MENU_OCR_TIMEOUT", 0.0):
             self.assertIsNone(navigator._nav_menu_choice(("狩猎场", "艾琳")))
@@ -623,6 +717,93 @@ class NavigatorTest(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertIn("艾琳", result.message)
+
+    def _circle_page_navigator(self, opens):
+        """Hand always read; ``opens`` answers each wait for the 传送页."""
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        navigator._status = lambda *_args: None
+        keys, hands, looked = [], [], []
+        navigator.task = SimpleNamespace(
+            tap_key=lambda key, after_sleep=0.0: keys.append(key) or True,
+            log_info=lambda *_a, **_k: None,
+        )
+        navigator.ensure_small_minimap = lambda: True
+        navigator._click_sandbox_teleport_interaction = lambda *a, **k: hands.append(True) or True
+        answers = iter(opens)
+        navigator._wait_for_sandbox_map_open = lambda *a, **k: next(answers)
+        navigator._wait_for_current_sandbox = lambda **_k: looked.append(True) or NavigationResult(
+            True, ScreenState.SANDBOX
+        )
+        return navigator, keys, hands, looked
+
+    def test_circle_page_not_opening_is_opened_again_then_falls_back(self):
+        # Leo 2026-10-20 (v0.2.2, 第8章): on the circle, the hand was pressed
+        # but no teleport page opened, and the card was skipped there.  「應該
+        # 要確保他打開」: the hand once more, then F; the ≡ menu only after.
+        card = CARD_BY_ID["Q_sp8"]
+        missed = NavigationResult(
+            False, ScreenState.UNKNOWN, "传送阵交互按钮后未稳定确认direct_teleport"
+        )
+        navigator, keys, hands, looked = self._circle_page_navigator([missed] * 3)
+        trips = []
+        navigator._travel_to_hunting_ground = lambda: trips.append(True) or "艾琳"
+        navigator.current_collection_target = lambda _card: card.targets[0].key
+
+        result = navigator.prepare_collection_main_area(card.card_id, via_hunting_ground=True)
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(2, len(hands))
+        self.assertEqual(["F"], keys)
+        self.assertEqual(3, len(looked))
+        self.assertEqual([True], trips)
+
+    def test_circle_page_opens_on_the_second_hand_press(self):
+        missed = NavigationResult(False, ScreenState.UNKNOWN, "未稳定确认direct_teleport")
+        opened = NavigationResult(
+            True, ScreenState.AREA_MAP, map_page_mode=MapPageMode.DIRECT_TELEPORT
+        )
+        navigator, keys, hands, _looked = self._circle_page_navigator([missed, opened])
+
+        result = navigator.open_teleport_map_from_sandbox()
+
+        self.assertTrue(result.success)
+        self.assertEqual(2, len(hands))
+        self.assertEqual([], keys)
+
+    def test_circle_page_wrong_page_is_closed_before_f(self):
+        wrong = NavigationResult(
+            False,
+            ScreenState.SANDBOX_MAP,
+            "入口与实际地图页面不一致",
+            map_page_mode=MapPageMode.SANDBOX_LARGE_MAP,
+        )
+        opened = NavigationResult(
+            True, ScreenState.AREA_MAP, map_page_mode=MapPageMode.DIRECT_TELEPORT
+        )
+        navigator, keys, hands, _looked = self._circle_page_navigator([wrong, wrong, opened])
+        closed = []
+        navigator._close_confirmed_map_page = lambda modes, **_k: closed.append(modes) or (
+            NavigationResult(True, ScreenState.SANDBOX)
+        )
+
+        result = navigator.open_teleport_map_from_sandbox()
+
+        self.assertTrue(result.success)
+        self.assertEqual([{MapPageMode.SANDBOX_LARGE_MAP}] * 2, closed)
+        self.assertEqual(["F"], keys)
+
+    def test_circle_page_f_is_never_sent_off_the_field(self):
+        missed = NavigationResult(False, ScreenState.UNKNOWN, "未稳定确认direct_teleport")
+        navigator, keys, hands, _looked = self._circle_page_navigator([missed])
+        navigator._wait_for_current_sandbox = lambda **_k: NavigationResult(
+            False, ScreenState.UNKNOWN
+        )
+
+        result = navigator.open_teleport_map_from_sandbox()
+
+        self.assertFalse(result.success)
+        self.assertEqual(1, len(hands))
+        self.assertEqual([], keys)
 
     def test_teleport_map_after_airin_walks_to_the_town_circle(self):
         navigator = Navigator(SimpleNamespace(), SimpleNamespace())
@@ -642,15 +823,96 @@ class NavigatorTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(MapPageMode.DIRECT_TELEPORT, result.map_page_mode)
 
+    def _hunting_ground_navigator(self, opened_after_key):
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        navigator._status = lambda *_args: None
+        keys = []
+        navigator.task = SimpleNamespace(
+            tap_key=lambda key, after_sleep=0.0: keys.append(key) or True,
+            log_info=lambda *_a, **_k: None,
+        )
+        navigator.open_teleport_map_from_sandbox = lambda: NavigationResult(
+            False, ScreenState.SANDBOX, NOT_BY_CIRCLE_MESSAGE
+        )
+        navigator._wait_for_sandbox_map_open = lambda *_a, **_k: opened_after_key
+        return navigator, keys
+
+    def test_hunting_ground_hand_not_read_presses_f(self):
+        # Leo 2026-10-17 「傳到狩獵場一定會有手勢可以按 沒辨識到就按f」.
+        opened = NavigationResult(
+            True, ScreenState.AREA_MAP, map_page_mode=MapPageMode.DIRECT_TELEPORT
+        )
+        navigator, keys = self._hunting_ground_navigator(opened)
+
+        result = navigator._open_teleport_map_at_hunting_ground()
+
+        self.assertTrue(result.success)
+        self.assertEqual(["F"], keys)
+
+    def test_hunting_ground_f_without_map_names_the_step(self):
+        navigator, keys = self._hunting_ground_navigator(
+            NavigationResult(False, ScreenState.UNKNOWN, "没打开")
+        )
+
+        result = navigator._open_teleport_map_at_hunting_ground()
+
+        self.assertFalse(result.success)
+        self.assertEqual(["F"], keys)
+        self.assertIn("按 F 后也没打开传送阵地图", result.message)
+
+    def test_hunting_ground_hand_pressed_but_map_failed_sends_no_f(self):
+        navigator, keys = self._hunting_ground_navigator(None)
+        navigator.open_teleport_map_from_sandbox = lambda: NavigationResult(
+            False, ScreenState.UNKNOWN, "点击传送阵交互按钮后未确认传送阵地图"
+        )
+
+        result = navigator._open_teleport_map_at_hunting_ground()
+
+        self.assertFalse(result.success)
+        self.assertEqual([], keys)
+
+    def test_restart_via_hunting_ground_uses_the_f_fallback(self):
+        card = CARD_BY_ID["Q_sp10"]
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        navigator.ensure_small_minimap = lambda: True
+        navigator._click_sandbox_teleport_interaction = lambda *a, **k: False
+        navigator._travel_to_hunting_ground = lambda: "狩猎场"
+        failed = NavigationResult(False, ScreenState.SANDBOX, "按 F 后也没打开传送阵地图")
+        calls = []
+        navigator._open_teleport_map_at_hunting_ground = lambda: calls.append(1) or failed
+
+        result = navigator.prepare_collection_main_area(card.card_id, via_hunting_ground=True)
+
+        self.assertEqual([1], calls)
+        self.assertIs(failed, result)
+
+    def test_no_way_to_a_circle_names_the_last_failure(self):
+        navigator = Navigator(SimpleNamespace(), SimpleNamespace())
+        navigator._status = lambda *_args: None
+        navigator.open_teleport_map_from_sandbox = lambda: NavigationResult(
+            False, ScreenState.SANDBOX, NOT_BY_CIRCLE_MESSAGE
+        )
+        navigator._walk_to_sandbox_teleport_interaction = lambda: NavigationResult(
+            False, ScreenState.SANDBOX, "地图上没找到传送门"
+        )
+        navigator._travel_to_hunting_ground = lambda: None
+
+        result = navigator._open_teleport_map_anywhere()
+
+        self.assertFalse(result.success)
+        self.assertIn("地图上没找到传送门", result.message)
+        self.assertIn("小地图导航也没能去狩猎场或艾琳", result.message)
+
     def test_teleport_map_page_arrows_are_strict_and_directional(self):
         self.assertEqual("image/green/TpMapLeft.png", TELEPORT_MAP_FORWARD_TEMPLATE.file_name)
         self.assertEqual("image/green/TpMapRight.png", TELEPORT_MAP_BACKWARD_TEMPLATE.file_name)
         for spec in (TELEPORT_MAP_FORWARD_TEMPLATE, TELEPORT_MAP_BACKWARD_TEMPLATE):
             with self.subTest(spec=spec.name):
-                self.assertEqual(0.95, spec.threshold)
+                # 0.93: the 1080p 桌面分身 卡勒塔市 left arrow read 0.948.
+                self.assertEqual(0.93, spec.threshold)
                 self.assertEqual(0.85, spec.min_pixel_score)
                 self.assertEqual(0.90, spec.min_zncc_score)
-                self.assertEqual(0.95, spec.minimum_safe_threshold)
+                self.assertEqual(0.93, spec.minimum_safe_threshold)
                 self.assertIsNone(spec.roi)
                 self.assertIsNone(spec.relative_roi)
 
@@ -1531,7 +1793,7 @@ class CollectionPageSeekTest(unittest.TestCase):
         position = [start]
         moves = []
 
-        def move(_card, _context, direction):
+        def move(_card, _context, direction, force=False):
             step = 1 if direction == "right" else -1
             if not 0 <= position[0] + step < len(pages):
                 return None
@@ -1608,7 +1870,7 @@ class CollectionPageSeekTest(unittest.TestCase):
         position = [start]
         attempts = []
 
-        def move(_card, _context, direction):
+        def move(_card, _context, direction, force=False):
             attempts.append(direction)
             step = 1 if direction == "right" else -1
             if not 0 <= position[0] + step < len(pages):
@@ -2000,6 +2262,24 @@ class WalkExitRetryTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual([(609, 737)], clicks)
 
+    def test_a_covered_label_with_a_known_place_stops_at_the_shorter_wait(self):
+        # 桌面分身 2026-10-18 角色卡3: 5 s of re-reads ended at the known place
+        # anyway; the 5 s wait (patched to 0 above) no longer applies.
+        card = CARD_BY_ID["Q_sp14"]
+        _main, left_corridor, central = card.targets
+        navigator, clicks = self._navigator(
+            ["战斗Ⅱ剑之神殿左侧回廊", "战斗Ⅰ剑之神殿中央回廊"], [""]
+        )
+        reads = []
+        navigator._exit_label_points = lambda _frame, _target: reads.append(1) or []
+
+        with patch("src.tasks.map_trade.navigator_sandbox.WALK_LABEL_KNOWN_READ_TIMEOUT", 0.0):
+            result = navigator._walk_to_collection_map(card, left_corridor, central)
+
+        self.assertTrue(result.success)
+        self.assertEqual(1, len(reads))
+        self.assertEqual([(609, 737)], clicks)
+
 
 class FakeClock:
     def __init__(self):
@@ -2091,7 +2371,7 @@ class LostPressTest(unittest.TestCase):
         def landed():
             return lands_on is not None and len(presses) >= lands_on
 
-        def boxes(_frame, _name, _roi):
+        def boxes(_frame, _name, _roi, **_kwargs):
             if landed() and not dialog:
                 return []
             return [
@@ -2146,6 +2426,8 @@ class LostPressTest(unittest.TestCase):
         self.assertEqual(2, len(presses))
         self.assertEqual([], trips)
         self.assertTrue(any("没有反应" in text for text in warnings))
+        # The run's message can say which part of the ≡ trip failed.
+        self.assertEqual("点了≡菜单的狩猎场没有反应", navigator._nav_failure)
 
     def test_the_travel_dialog_over_the_menu_counts_as_taken(self):
         navigator, presses, clock, trips, _warnings = self._nav_menu_navigator(

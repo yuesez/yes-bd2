@@ -8,6 +8,7 @@ from ok.task.exceptions import FinishedException, TaskDisabledException
 from qfluentwidgets import FluentIcon
 
 from src.tasks.BaseBD2Task import (
+    FIELD_FOLLOWERS_KEY,
     FIEND_HUNT_REWARD_DISMISS_TEXT,
     FIEND_HUNT_REWARD_TITLE,
     RECENT_CARTRIDGE_SPECIAL_PAGE_MAX_ACTIONS,
@@ -47,6 +48,7 @@ from src.utils.cartridge_quick_switch import (
     category_highlight_ratio,
 )
 from src.utils.colour_rules import switch_knob_side, switch_yellow_ratio
+from src.utils.field_followers import FOLLOWERS_DISMISSED
 from src.utils.free_switch import ensure_free_switch_on
 from src.utils.home_confirmation import (
     HOME_DIMMED_P95_THRESHOLD_DEFAULT,
@@ -66,6 +68,8 @@ from src.utils.ocr_utils import normalize_ocr_text
 from src.utils.pvp_dialog import (
     MULTIPLIER_RANGE,
     adjust_step,
+    step_moves,
+    steps_between,
     parse_battle_count,
     parse_free_cocktails,
     parse_multiplier,
@@ -104,6 +108,7 @@ from src.utils.wait_limits import (
     capped,
     is_loading_dark,
     load_wait,
+    scene_at_press,
 )
 
 REFERENCE_WIDTH = FHD_1080.width
@@ -127,6 +132,11 @@ PVP_BACK_HOME_REFERENCE_POINT = (1797, 63)  # 1920×1080 参考
 # Top-left back arrow of the pre-battle stage screen (same as every page's).
 PVP_STAGE_BACK_REFERENCE_POINT = (150, 50)
 PVP_CARTRIDGE_SLOT_POINT = (152 / REFERENCE_WIDTH, 970 / REFERENCE_HEIGHT)
+# Hub entry: how long to stand for the "!" followers, and the pause after the
+# F key that goes when no press was seen to clear them (Leo 2026-10-20).
+PVP_FOLLOWERS_STAND_SECONDS = 5.0
+PVP_FOLLOWERS_KEY_SETTLE_SECONDS = 1.0
+PVP_FOLLOWERS_DISMISSED_SETTLE_SECONDS = 1.5
 PVP_AUTO_BATTLE_SCREEN_ROI = (1470, 910, 170, 150)
 # Reference ROI for the multiplier value in the main auto-battle popup. The value
 # sits directly left of the settings gear (reference x ≈ 868 at 1280x720); the ROI
@@ -191,7 +201,10 @@ PVP_RANK_PAGE_TITLES = ("恭喜晋级", "段位下滑")
 PVP_SEASON_REWARD_AFTER_CLICK_SECONDS = 3.0
 # How long the shelf may stay up after the 镜中之战 card press before the
 # press counts as swallowed and is made once more.
-PVP_CARD_REPRESS_SECONDS = 4.0
+PVP_CARD_REPRESS_SECONDS = 2.5
+# 竞技场 drops presses more often (player via Leo 2026-10-17 「切换卡带的时候
+# 可以点两下」): the card is pressed again up to this many times.
+PVP_CARD_REPRESSES = 2
 # After a battle the 赛季奖励 page can cover the hub (first hub visit after the
 # Monday reset, player report 2026-10-12, v0.1.24): it is tapped away there.
 # When its 点击画面即可返回 line is not read, the tap goes to the blank spot
@@ -565,8 +578,10 @@ class PVPTask(BaseBD2Task):
         self.info_set("当前阶段", "点击镜中之战卡带")
         self._click_reference(*point, after_sleep=0.0)
         # A press the game swallowed leaves the shelf up (player 2026-10-13,
-        # v0.1.30: 30 s on 游戏卡珍藏集 after one press): press once more.
-        if self._collection_still_shows(PVP_CARD_REPRESS_SECONDS):
+        # v0.1.30: 30 s on 游戏卡珍藏集 after one press): press again.
+        for _repress in range(PVP_CARD_REPRESSES):
+            if not self._collection_still_shows(PVP_CARD_REPRESS_SECONDS):
+                break
             self.log_info("镜中之战：点了镜中之战卡带还停在游戏卡珍藏集，再点一次。")
             self._click_reference(*point, after_sleep=0.0)
         if self._wait_for_pvp_hub_after_cart(
@@ -800,7 +815,9 @@ class PVPTask(BaseBD2Task):
         self.info_set("当前阶段", "确认主页")
         # Home may still be loading (back from PVP or a field): a load wait
         # (Leo 2026-10-15 「你單純等載入怎麼可以改成只等10秒」).
-        wait = load_wait(monotonic(), float(self.config.get("主页确认等待秒数", 10.0)))
+        wait = load_wait(
+            monotonic(), float(self.config.get("主页确认等待秒数", 10.0)), before=scene_at_press(self)
+        )
         last_left_hits = 0
         last_p95 = 0.0
         last_gacha_text = ""
@@ -854,7 +871,7 @@ class PVPTask(BaseBD2Task):
 
         The PVP field comes after a loading screen: a load wait (Leo
         2026-10-15 「你單純等載入怎麼可以改成只等10秒」), see load_wait."""
-        wait = load_wait(monotonic(), timeout)
+        wait = load_wait(monotonic(), timeout, before=scene_at_press(self))
         handled: set[str] = set()
         action_count = 0
         last_text = ""
@@ -944,10 +961,28 @@ class PVPTask(BaseBD2Task):
     def _clear_pvp_hub_notice_if_present(self) -> None:
         # The hub "!" is the field F button: it shows while the characters
         # that follow the player after login are around, and they stand on
-        # the stage until it is pressed (Leo, 2026-10-03).
-        self.dismiss_field_followers()
+        # the stage until it is pressed (Leo, 2026-10-03).  Leo 2026-10-20
+        # 「開局站的5秒 如果有成功點掉就繼續 沒成功點掉就先按一下f 然後等1秒 才走到
+        # 舞台」: looked for every time; unless a press is seen to clear it,
+        # the F key goes once anyway in case the icon was missed.
+        outcome = self.dismiss_field_followers(
+            appear_seconds=PVP_FOLLOWERS_STAND_SECONDS, even_if_done_today=True
+        )
+        if outcome == FOLLOWERS_DISMISSED:
+            # 「點掉也要等個1.5秒 才走」 (Leo 2026-10-20).
+            self.sleep(PVP_FOLLOWERS_DISMISSED_SETTLE_SECONDS)
+            return
+        self.log_info("镜中之战：开场 5 秒没确认赶走跟随角色，先按一次 F，等 1 秒再走去舞台。")
+        self.tap_key(FIELD_FOLLOWERS_KEY, after_sleep=PVP_FOLLOWERS_KEY_SETTLE_SECONDS)
 
     def _click_pvp_stage_once(self, timeout: float) -> bool:
+        # Standing on the stage hides it under the line-up, so the template
+        # cannot match there (player v0.2.3 1080p 2026-10-20: BATTLE and
+        # 阵形设置 already on screen, then 「未找到 PVP 舞台物件」).  Being at
+        # the pre-battle screen is the goal of the click, so it counts.
+        if self._pre_battle_visible():
+            self.info_set("PVP 舞台", "已在战前画面")
+            return True
         return self._click_template_until(
             PVP_STAGE_TEMPLATE,
             timeout=timeout,
@@ -1460,15 +1495,21 @@ class PVPTask(BaseBD2Task):
             self.info_set("PVP 倍率 OCR", "未确认")
             return False
 
-        # From MIN (1) or MAX (40) step with -5/+5 and -/+ reading the value
-        # back each time, so any multiplier 1~40 is reachable.
+        # From MIN (1) or MAX (40) the presses that reach the target are
+        # known: press them, then read.  A read that is off only steps on
+        # toward the target (a swallowed press); one that would turn back is
+        # a misread and stepping stops (a player 2026-10-21: 「镜中之战一直点
+        # 右边+1 和-5死循环了」, the value read back wrong after each press).
+        for step in steps_between(option_value, multiplier, 5):
+            self._click_reference(*PVP_MULTIPLIER_STEP_POINTS[step], after_sleep=0.4)
+        upward = multiplier > option_value
         for _ in range(24):
             if self._setting_multiplier_matches(multiplier):
-                break
+                return True
             # A dropped digit is retried instead of ending the stepping.
             current = self._read_until(self._setting_multiplier_value)
             step = adjust_step(current, multiplier, 5) if current is not None else None
-            if step is None:
+            if step is None or (step_moves(step, 5) > 0) != upward:
                 break
             self._click_reference(*PVP_MULTIPLIER_STEP_POINTS[step], after_sleep=0.4)
 
@@ -1477,8 +1518,13 @@ class PVPTask(BaseBD2Task):
                 self.sleep(0.4)
             if self._setting_multiplier_matches(multiplier):
                 return True
+        # Not read as the target here: 确认 is judged by the main popup's
+        # multiplier and the cost on 战斗开始, which must both agree.
         self.info_set("PVP 倍率 OCR", "未确认")
-        return False
+        self.log_info(
+            f"镜中之战：倍率设置里没读到 {multiplier}，按确认后看主弹窗和战斗开始的消耗。"
+        )
+        return True
 
     def _confirm_setting_multiplier(self, multiplier: int) -> bool:
         # BUG-20260906-01：确认点击被吞时设置弹窗不关、主弹窗回读不变；仅在
@@ -1600,6 +1646,10 @@ class PVPTask(BaseBD2Task):
                 return None
             step = adjust_step(current, count, 10)
             if step is None:
+                return current
+            if step_moves(step, 10) < 0:
+                # Counted up from MIN: a step back down is a misread, and
+                # stepping on would go round in a loop (see the multiplier).
                 return current
             if self.press_and_confirm(
                 "镜中之战「战斗次数」",
@@ -1868,7 +1918,10 @@ class PVPTask(BaseBD2Task):
     def _click_leave_button(self) -> bool:
         # The result page comes after the battle ends: a load wait (Leo
         # 2026-10-15 「你單純等載入怎麼可以改成只等10秒」).
-        wait = load_wait(monotonic(), self._load_seconds("PVP 离开等待秒数"))
+        # The result is itself an overlay this step reads: no popup closing.
+        wait = load_wait(
+            monotonic(), self._load_seconds("PVP 离开等待秒数"), before=scene_at_press(self), popups=False
+        )
         last_text = ""
         while True:
             frame = self.capture_frame()

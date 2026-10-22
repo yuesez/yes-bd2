@@ -239,6 +239,17 @@ SUPPRESS_ONLY_VERIFIED_CARD_IDS = frozenset({"Q_sp6", "Q_sp18"})
 # no 压制 badge at all, before or after the run (live 4K 2026-10-09: only ✦,
 # ticked after its three maps; Leo 2026-10-11: nothing left under it = done).
 ABSORB_ONLY_VERIFIED_CARD_IDS = frozenset({"Q_ep2"})
+# What a suppress-only card's 吸取 badge still shows when the card is done
+# (Leo 2026-10-20, his card bar: 第6章 压制 ticked and 吸取 「2」 = done for
+# the week, 「第六章跑過就是我現在這個狀態 所以不要再跑」; both ticked is done
+# too).  Another number there means a map is still left.
+ABSORB_LEFT_WHEN_DONE = {"Q_sp6": 2}
+# Snow cards: a used skill icon still reads bright on the white ground
+# (2K 2026-10-20, 第13章 记忆裂缝/华特波尔雪山/华特波尔镇: grey icons 0.81-0.83
+# against 0.58-0.61 elsewhere), so waiting for grey cost ~12 s a skill.
+# There the game's success toast is the proof and the count is checked
+# later (Leo 2026-10-21 「只有雪山這樣 其他不用改」).
+SNOW_CARD_IDS = frozenset({"Q_sp13"})
 
 
 # (card, from map, to map) walked through the area map instead of teleporting:
@@ -272,6 +283,19 @@ WALK_LABEL_EDGES = {
     # the label centre + 18 px.
     ("Q_sp18", "main_area", "battle_area_1"): (525, 278),
 }
+# Maps the teleport map cannot take you to (no circle there): reached only by
+# walking from the neighbour named in WALK_EDGES / WALK_LABEL_EDGES.  When
+# that neighbour is already done (e.g. the day's skills ran out after it),
+# the route still passes through it (Leo 2026-10-20: ch14 went town ->
+# 中央回廊 by the teleport map, 「未识别到传送阵地图传送阵」, card skipped;
+# players reported ch6/ch14 map changes failing).
+WALK_ONLY_TARGETS = frozenset(
+    {
+        ("Q_sp6", "battle_area_2"),
+        ("Q_sp14", "battle_area_2"),
+        ("Q_cp3", "battle_area_2"),
+    }
+)
 # Areas without a teleport circle, left through an area-map exit for a
 # neighbour that has one: card -> (that area, the neighbour).  Chapter 18
 # (live 4K 2026-10-10): the quick switch and 艾琳 both put the character in

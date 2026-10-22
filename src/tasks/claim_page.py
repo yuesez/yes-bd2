@@ -32,9 +32,17 @@ from src.utils.known_popups import (  # noqa: F401 - re-exported for the tasks
     OVERLAY_DISMISS_KEYWORDS,
     REWARD_DIALOG_TITLES,
 )
+from src.utils.home_confirmation import HOME_ANNOUNCEMENT_CLEAR_REFERENCE_POINT
 from src.utils.ocr_utils import keyword_match_count, normalize_ocr_text
 from src.utils.press_confirm import SLOW_PC_GRACE_SECONDS
-from src.utils.wait_limits import LOADING_MAX_SECONDS, STUCK_SECONDS, is_loading_dark, load_wait
+from src.utils.wait_limits import (
+    LOADING_MAX_SECONDS,
+    POPUP_LOOK_SECONDS,
+    STUCK_SECONDS,
+    is_loading_dark,
+    load_wait,
+    scene_at_press,
+)
 
 # 1920x1080 reference coordinates, calibrated on the 简体 client 2026-09-25.
 BACK_BUTTON_POINT = (150, 50)
@@ -102,6 +110,31 @@ def claim_button_dimmed(frame, box) -> bool:
     crop = frame[y0:y1, x0:x1, :3]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
     return float(np.median(gray)) < CLAIM_BUTTON_GREY_MAX
+
+
+# A left-list card to visit carries a red ◆「!」 badge at its top-right
+# corner (活动 and 通行证 pages): 17-18 px squares measured at 1080p.
+BADGE_MIN_AREA, BADGE_MAX_AREA = 80, 400
+
+
+def find_red_badges(frame, strip: tuple[int, int, int, int]) -> list[int]:
+    """Reference y of each red ◆! badge inside ``strip``, top to bottom."""
+    height, width = frame.shape[:2]
+    scale = width / REFERENCE_WIDTH
+    x, y, w, h = strip
+    crop = frame[int(y * scale) : int((y + h) * scale), int(x * scale) : int((x + w) * scale), :3]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    red = (
+        ((hsv[..., 0] <= 8) | (hsv[..., 0] >= 172)) & (hsv[..., 1] >= 150) & (hsv[..., 2] >= 150)
+    ).astype(np.uint8)
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(red, 8)
+    found = []
+    for index in range(1, count):
+        _cx, cy, _cw, ch, area = stats[index]
+        area_ref = area / scale / scale
+        if BADGE_MIN_AREA <= area_ref <= BADGE_MAX_AREA:
+            found.append(round(y + (cy + ch / 2) / scale))
+    return sorted(found)
 
 
 # Seconds a claim button is looked for before 「跳过」.
@@ -367,7 +400,18 @@ class ClaimPageMixin(TaskVisionMixin):
             ):
                 break
             self.log_info(f"{label}：入口点击后仍在主页，重试点击。")
+            self._clear_home_popup(label)
         return self._wait_for_title(label, title_keywords)
+
+    def _clear_home_popup(self, label: str) -> None:
+        """A click on 主页 that did nothing: a login popup may lie over it while
+        the home check still passes (4K clone 10-21: a pass promo, then the
+        Bilibili banner, three entry clicks lost).  Leo 「彈窗不是點掉就好了嗎」:
+        its own close button, else the blank spot left of every popup."""
+        if self.close_known_popup(label):
+            return
+        blank = HOME_ANNOUNCEMENT_CLEAR_REFERENCE_POINT
+        self._click_reference(*blank, after_sleep=1.0)  # 不用确认：主页空白处，接着重点入口
 
     def _switch_tab(
         self,
@@ -400,9 +444,10 @@ class ClaimPageMixin(TaskVisionMixin):
                 timeout = float(self.config.get("页面等待秒数", LOADING_MAX_SECONDS))
             except (TypeError, ValueError):
                 timeout = LOADING_MAX_SECONDS
-            wait = load_wait(started, timeout)
+            wait = load_wait(started, timeout, before=scene_at_press(self))
             timeout = max(timeout, LOADING_MAX_SECONDS)
         end_at = started + timeout
+        popup_look_at = started + POPUP_LOOK_SECONDS
         last_text, same_since = None, started
         while True:
             frame = self.capture_frame()
@@ -430,6 +475,13 @@ class ClaimPageMixin(TaskVisionMixin):
                     break
             elif now > end_at:
                 break
+            elif now >= popup_look_at and not self._passes(loading, LOADING_TEMPLATE):
+                # A fixed wait is no load wait: it closes a covering popup
+                # itself (a load wait does it in ProgressWait).
+                popup_look_at = now + POPUP_LOOK_SECONDS
+                if self.close_known_popup(label, info_only=True):
+                    end_at = max(end_at, monotonic() + POPUP_LOOK_SECONDS)
+                    continue
             self.sleep(0.5)
         if not quiet:
             self.log_info(f"{label}：等待页面标题 {'/'.join(title_keywords)} 超时。")

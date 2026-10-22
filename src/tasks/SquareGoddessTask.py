@@ -8,7 +8,12 @@ import numpy as np
 from ok.task.exceptions import FinishedException, TaskDisabledException
 from qfluentwidgets import FluentIcon
 
-from src.tasks.BaseBD2Task import BaseBD2Task, CartridgeSpecialPageResult
+from src.tasks.BaseBD2Task import (
+    QUICK_SWITCH_HOME_LOOK_SECONDS,
+    QUICK_SWITCH_REPRESS_LOOK_SECONDS,
+    BaseBD2Task,
+    CartridgeSpecialPageResult,
+)
 from src.tasks.map_trade.models import MatchResult, TemplateSpec
 from src.tasks.map_trade.navigator_constants import (
     AUTO_MOVE_CANCEL_ATTEMPTS,
@@ -31,11 +36,17 @@ from src.utils.cartridge_quick_switch import (
     SHOPKEEPER_CATEGORY_LABEL,
     category_highlight_ratio,
 )
-from src.utils.field_followers import FOLLOWERS_ABSENT
+from src.utils.fantasia_square import (
+    FANTASIA_SQUARE_TEMPLATE,
+    LIFE_SLOT_NUMBERS,
+    LIFE_SLOT_POINTS,
+    SQUARE_CARTRIDGE_SLOT_POINT,
+    square_card_point,
+)
+from src.utils.field_followers import FOLLOWERS_ABSENT, FOLLOWERS_DONE_TODAY
 from src.utils.goddess_navigation import (
     NEW_DAILY_ICON,
     NavigationObservation,
-    is_goddess_completion,
     scan_navigation,
 )
 from src.utils.home_confirmation import (
@@ -53,21 +64,26 @@ from src.utils.image_utils import (
     stabilize_template_match,
 )
 from src.utils.ocr_utils import normalize_ocr_text
-from src.utils.wait_limits import STUCK_SECONDS, StillTimer, capped, is_loading_dark, load_wait
+from src.utils.wait_limits import STUCK_SECONDS, StillTimer, capped, is_loading_dark, load_wait, scene_at_press
 
 REFERENCE_WIDTH = FHD_1080.width
 REFERENCE_HEIGHT = FHD_1080.height
 HD720_REFERENCE_WIDTH = HD_720.width
 HD720_REFERENCE_HEIGHT = HD_720.height
-SQUARE_CARTRIDGE_SLOT_POINT = (331 / REFERENCE_WIDTH, 970 / REFERENCE_HEIGHT)
 # Swallowed quick-switch clicks: up to this many category / slot clicks.
 SQUARE_CLICK_VERIFY_ATTEMPTS = 3
+# The 广场 card press counts as dropped once the unchanged selection page has
+# shown this long (was 8 s; Leo 2026-10-17 「切换卡带的时候可以点两下」).
+SQUARE_CARD_REPRESS_SECONDS = 2.5
 SQUARE_HOME_POINT = (1797 / REFERENCE_WIDTH, 63 / REFERENCE_HEIGHT)
 # The game's shortcut shown under that button (Leo 2026-10-11 「我點H就回到主頁了」).
 SQUARE_HOME_KEY = "H"
 GODDESS_NAVIGATION_CLICKED = "navigation_clicked"
 GODDESS_NAVIGATION_RETRIES = 2
-GODDESS_ALREADY_COMPLETE = "already_complete"
+# The key shown beside the daily row; it starts the walk to the goddess.
+GODDESS_ROW_KEY = "E"
+# The game's talk key: wishes when standing at the statue.
+GODDESS_TALK_KEY = "F"
 # The prayer prompt read twice may move this far (client pixels) and still count.
 GODDESS_PROMPT_STEADY_PIXELS = 24
 # Unread daily row: press where it sits as the first task (a player's 1080p
@@ -131,7 +147,7 @@ class SquareGoddessTask(BaseBD2Task):
         super().__init__(*args, **kwargs)
         self.name = "广场女神像"
         self.description = (
-            "从快速切换页的生活玩法游戏卡带2号位进入梦幻广场并完成女神像许愿。"
+            "从快速切换页的生活玩法游戏卡带里找到广场卡带进入梦幻广场并完成女神像许愿。"
         )
         self.icon = FluentIcon.GAME
         self.group_name = "日常/周常"
@@ -153,8 +169,6 @@ class SquareGoddessTask(BaseBD2Task):
                 "玩法类别高亮像素比例": GAMEPLAY_CATEGORY_HIGHLIGHT_MIN_RATIO,
                 "广场 OCR 阈值": 0.2,
                 "广场入场等待秒数": STUCK_SECONDS,
-                "广场感叹号等待秒数": 3.0,
-                "祈祷完成后感叹号等待秒数": 5.0,
                 "女神像导航入口等待秒数": 8.0,
                 "女神像导航最长等待秒数": 90.0,
                 "女神像寻路卡住秒数": GODDESS_WALK_STUCK_SECONDS,
@@ -176,10 +190,6 @@ class SquareGoddessTask(BaseBD2Task):
                     "生活玩法游戏卡带标签确认为高亮状态所需的最低亮色像素占比。"
                 ),
                 "广场入场等待秒数": "点击广场卡带后等待梦幻广场场景出现的最长时间。",
-                "广场感叹号等待秒数": "进入广场后等待并点击感叹号小任务的最长时间。",
-                "祈祷完成后感叹号等待秒数": (
-                    "确认祈祷完成或今日已完成后，再次等待并点击感叹号小任务的最长时间。"
-                ),
                 "女神像导航最长等待秒数": (
                     "点击每日导航后，角色一直在走时最多等这么久；10 秒没进展就不再等。"
                 ),
@@ -259,6 +269,37 @@ class SquareGoddessTask(BaseBD2Task):
         )
 
     def _enter_square_from_home(self) -> bool:
+        """The square card is clicked where its picture is.  When the picture
+        can't be read, slot 2 is tried, and if that opens another field (a
+        player's row in another order: v0.1.42 summary 2026-10-15 landed in
+        格鲁菲餐厅), back to 主页 and the next slot."""
+        blind_slots = list(LIFE_SLOT_POINTS)
+        while True:
+            entered, by_picture = self._enter_square_once(blind_slots)
+            if entered:
+                return True
+            if by_picture is not False or not blind_slots:
+                return False
+            self.log_info("广场女神像：点的那格没进梦幻广场，回主页换下一格。")
+            if not self._return_home_from_square():
+                return False
+
+    def _find_square_card(self):
+        """Where the square cartridge is in the 生活玩法 row; a slow PC gets a
+        second look a second later."""
+        score = -1.0
+        for look in range(2):
+            if look:
+                self.sleep(1.0)
+            point, score = square_card_point(self.capture_frame(), self.config, self._templates)
+            self.info_set("广场卡带图", f"{score:.3f}")
+            if point is not None:
+                return point
+        return None
+
+    def _enter_square_once(self, blind_slots: list) -> tuple[bool, bool | None]:
+        """(entered, whether the card was found by its picture); None when
+        the card row never came up."""
         self.info_set("当前阶段", "打开卡带快速切换")
         if not self.open_cartridge_quick_switcher(
             ensure_home=self._wait_for_cartridge_home,
@@ -270,9 +311,22 @@ class SquareGoddessTask(BaseBD2Task):
                 stabilize=True,
             ),
             confirm_quick_switch_page=self._wait_for_quick_switch_page,
+            quick_switch_page_shown=lambda seconds: self._wait_for_quick_switch_page(
+                timeout=seconds, quiet=True
+            ),
+            repress_quick_switch=lambda: self._click_template_until(
+                QUICK_SWITCH_TEMPLATE,
+                timeout=QUICK_SWITCH_REPRESS_LOOK_SECONDS,
+                name="快速切换按钮",
+                after_sleep=0.0,
+                stabilize=True,
+            ),
+            home_shown=lambda: self._wait_for_cartridge_home(
+                timeout=QUICK_SWITCH_HOME_LOOK_SECONDS
+            ),
         ):
             self.log_info("广场女神像：未能从主页打开卡带快速切换页面。")
-            return False
+            return False, None
 
         self.info_set("当前阶段", "选择生活玩法游戏卡带")
         self.sleep(0.5)
@@ -285,19 +339,27 @@ class SquareGoddessTask(BaseBD2Task):
                 highlighted=False, seconds=1.0
             ):
                 self.log_info("广场女神像：点击后未确认生活玩法游戏卡带类别高亮。")
-                return False
+                return False, None
             self.log_info(f"广场女神像：第{attempt}次点击生活玩法类别未生效，重试。")
 
-        self.info_set("当前阶段", "选择广场卡带2号位")
+        self.info_set("当前阶段", "选择广场卡带")
         self.sleep(FIXED_CARTRIDGE_SLOT_PRE_CLICK_DELAY_SECONDS)
-        self.operate_click(*SQUARE_CARTRIDGE_SLOT_POINT, after_sleep=0.0)
+        slot = self._find_square_card()
+        by_picture = slot is not None
+        if not by_picture:
+            slot = blind_slots.pop(0)
+            number = LIFE_SLOT_NUMBERS[LIFE_SLOT_POINTS.index(slot)]
+            self.log_info(f"广场女神像：没认出广场卡带的图，改点生活玩法第{number}格。")
+        self.operate_click(*slot, after_sleep=0.0)
         # 卡带格点击被吞时选择页原样停住；连续数秒仍是同一页（类别仍高亮）才重点，
         # 页面一变就不再点，避免载入中重复操作。
         for attempt in range(1, SQUARE_CLICK_VERIFY_ATTEMPTS):
-            if not self._quick_switch_still_shows(highlighted=True, seconds=8.0):
+            if not self._quick_switch_still_shows(
+                highlighted=True, seconds=SQUARE_CARD_REPRESS_SECONDS
+            ):
                 break
             self.log_info(f"广场女神像：第{attempt}次点击广场卡带后选择页仍在，重试。")
-            self.operate_click(*SQUARE_CARTRIDGE_SLOT_POINT, after_sleep=0.0)
+            self.operate_click(*slot, after_sleep=0.0)
 
         if self._wait_for_template(
             FANTASIA_SQUARE_TEMPLATE,
@@ -305,19 +367,20 @@ class SquareGoddessTask(BaseBD2Task):
             name="梦幻广场",
             arrival=True,
         ):
-            return True
+            return True, by_picture
 
         if self._handle_recent_cartridge_special_pages(
             allow_pvp_pages=False,
         ) is CartridgeSpecialPageResult.HANDLED:
-            return self._wait_for_template(
+            entered = self._wait_for_template(
                 FANTASIA_SQUARE_TEMPLATE,
                 timeout=float(self.config.get("广场入场等待秒数", STUCK_SECONDS)),
                 name="梦幻广场",
                 arrival=True,
             )
+            return entered, by_picture
 
-        return False
+        return False, by_picture
 
     def _wait_for_cartridge_home(
         self,
@@ -336,7 +399,7 @@ class SquareGoddessTask(BaseBD2Task):
         end_at = monotonic() + wait_seconds
         # Leaving the square loads (Leo 2026-10-15 「你單純等載入怎麼可以改成只等
         # 10秒」): a full wait does not end while the screen is loading.
-        wait = load_wait(monotonic(), wait_seconds) if wait_seconds >= STUCK_SECONDS else None
+        wait = load_wait(monotonic(), wait_seconds, before=scene_at_press(self)) if wait_seconds >= STUCK_SECONDS else None
         last_left_hits = 0
         last_p95 = 0.0
         last_gacha_text = ""
@@ -441,12 +504,18 @@ class SquareGoddessTask(BaseBD2Task):
         )
         return False
 
-    def _wait_for_quick_switch_page(self, interval: float = 0.5) -> bool:
+    def _wait_for_quick_switch_page(
+        self,
+        interval: float = 0.5,
+        timeout: float | None = None,
+        quiet: bool = False,
+    ) -> bool:
+        """``timeout`` set: a short look (no settle sleep, no log on a miss)."""
         self.info_set("当前阶段", "确认卡带选择页")
-        self.sleep(1.0)
-        end_at = monotonic() + float(
-            self.config.get("卡带选择页确认等待秒数", 10.0)
-        )
+        if timeout is None:
+            self.sleep(1.0)
+            timeout = float(self.config.get("卡带选择页确认等待秒数", 10.0))
+        end_at = monotonic() + max(0.0, timeout)
         last_text = ""
         while monotonic() <= end_at:
             frame = self.capture_frame()
@@ -464,6 +533,8 @@ class SquareGoddessTask(BaseBD2Task):
                 return True
             self.sleep(interval)
 
+        if quiet:
+            return False
         self.log_info(
             "广场女神像：点击快速切换后未确认卡带选择页，"
             f"OCR={last_text or '-'}。"
@@ -567,18 +638,12 @@ class SquareGoddessTask(BaseBD2Task):
 
     def _pray_at_goddess(self) -> bool:
         self.info_set("当前阶段", "检查广场感叹号")
-        self._click_square_notice_if_present(
-            timeout=float(self.config.get("广场感叹号等待秒数", 3.0))
-        )
+        self._click_square_notice_if_present()
 
         self.info_set("当前阶段", "检查女神像每日导航")
         navigation_result = self._click_goddess_daily_navigation_until(
             timeout=float(self.config.get("女神像导航入口等待秒数", 8.0))
         )
-        if navigation_result == GODDESS_ALREADY_COMPLETE:
-            self.info_set("女神像许愿 OCR", "已确认女神像许愿任务完成")
-            self.log_info("广场女神像：已确认女神像许愿任务完成。")
-            return True
         if navigation_result != GODDESS_NAVIGATION_CLICKED and self._prayer_prompt_steady():
             # A player's 1080p frame (2026-10-11): standing at the goddess with
             # 「向女神像许愿」 up, the daily row over the pink food truck unread.
@@ -590,6 +655,8 @@ class SquareGoddessTask(BaseBD2Task):
             self.info_set("女神像许愿 OCR", "今日已许愿（导航已消失）")
             self.log_info("广场女神像：今天已经许愿过，每日导航已消失。")
             return True
+        if navigation_result != GODDESS_NAVIGATION_CLICKED and self._walk_by_key():
+            navigation_result = GODDESS_NAVIGATION_CLICKED
         if navigation_result != GODDESS_NAVIGATION_CLICKED and (
             self._press_row_where_it_usually_is()
         ):
@@ -611,9 +678,7 @@ class SquareGoddessTask(BaseBD2Task):
             return False
 
         self.info_set("当前阶段", "祈祷完成后检查广场感叹号")
-        self._click_square_notice_if_present(
-            timeout=float(self.config.get("祈祷完成后感叹号等待秒数", 5.0))
-        )
+        self._click_square_notice_if_present()
         return True
 
     def _prayer_prompt_steady(self) -> bool:
@@ -633,6 +698,33 @@ class SquareGoddessTask(BaseBD2Task):
                 return False
             previous = point
         return True
+
+    def _walk_by_key(self) -> bool:
+        """The daily row's own key E walks to the goddess (Leo 2026-10-20
+        「點 E 會走到女神像」); True once a walk or the prompt shows."""
+        self.log_info(f"广场女神像：每日导航读不到，改按快捷键 {GODDESS_ROW_KEY} 走去女神像。")
+        if not self.tap_key(GODDESS_ROW_KEY, after_sleep=1.0):
+            return False
+        if self._walk_or_prompt_within(GODDESS_ROW_PRESS_CONFIRM_SECONDS):
+            self.log_info(f"广场女神像：按 {GODDESS_ROW_KEY} 以后开始走向女神像了。")
+            return True
+        self.log_info(f"广场女神像：按了 {GODDESS_ROW_KEY} 也没开始走。")
+        return False
+
+    def _tap_row_key(self) -> None:
+        self.tap_key(GODDESS_ROW_KEY, after_sleep=2.0)
+
+    def _walk_or_prompt_within(self, seconds: float) -> bool:
+        end_at = monotonic() + seconds
+        while True:
+            point, text = self._ocr_pattern_click_point(
+                self.capture_frame(), GODDESS_PRAY_PATTERNS, name="女神像许愿", roi=None
+            )
+            if point is not None or self._walk_banner_shown(text):
+                return True
+            if monotonic() >= end_at:
+                return False
+            self.sleep(0.5)
 
     def _press_row_where_it_usually_is(self) -> bool:
         """Press the daily row's usual spot; True once a walk or the prompt shows."""
@@ -655,10 +747,12 @@ class SquareGoddessTask(BaseBD2Task):
                 return False
             self.sleep(0.5)
 
-    def _click_square_notice_if_present(self, timeout: float = 3.0) -> bool:
+    def _click_square_notice_if_present(self) -> bool:
         # The square "!" is the field F button: it shows while the characters
         # that follow the player after login are around (Leo, 2026-10-03).
-        return self.dismiss_field_followers(appear_seconds=timeout) != FOLLOWERS_ABSENT
+        # Looked for every time, even after 镜中之战 sent them away (Leo
+        # 2026-10-20 「廣場處還是要注意有沒有驚嘆號」).
+        return self.clear_field_followers() not in (FOLLOWERS_ABSENT, FOLLOWERS_DONE_TODAY)
 
     def _click_goddess_daily_navigation_until(
         self,
@@ -667,18 +761,9 @@ class SquareGoddessTask(BaseBD2Task):
     ) -> str | None:
         end_at = monotonic() + max(0.0, timeout)
         previous = None
-        completion_hits = 0
         while monotonic() <= end_at:
             frame = self.capture_frame()
             observation = self._observe_goddess_navigation(frame)
-            if is_goddess_completion(observation.text):
-                completion_hits += 1
-                previous = None
-                if completion_hits >= 2:
-                    return GODDESS_ALREADY_COMPLETE
-                self.sleep(interval)
-                continue
-            completion_hits = 0
             nav = observation.navigation
             if nav is not None and previous is not None:
                 tolerance = max(nav.height, previous.height)
@@ -707,6 +792,7 @@ class SquareGoddessTask(BaseBD2Task):
         )
         walking_since = None
         walk_still = StillTimer()
+        talked = False
         # Nothing to read, no walk and no press: the screen is not getting
         # anywhere (the overall limit only holds a walk that keeps moving).
         idle_since = monotonic()
@@ -747,8 +833,8 @@ class SquareGoddessTask(BaseBD2Task):
                 navigation = self._click_goddess_daily_navigation_until(
                     timeout=float(self.config.get("女神像导航入口等待秒数", 8.0))
                 )
-                if navigation == GODDESS_ALREADY_COMPLETE:
-                    return True
+                if navigation != GODDESS_NAVIGATION_CLICKED:
+                    self._tap_row_key()
                 last_navigation_at = monotonic()
                 idle_since = monotonic()
                 continue
@@ -766,6 +852,32 @@ class SquareGoddessTask(BaseBD2Task):
                 click_count += 1
                 idle_since = monotonic()
             else:
+                if (
+                    (click_count or talked)
+                    and point is None
+                    and self._wait_for_daily_navigation_to_disappear(timeout=2.5)
+                ):
+                    return True
+                if (
+                    monotonic() - idle_since >= STUCK_SECONDS
+                    and (point is not None or renav_left <= 0)
+                    and not talked
+                ):
+                    # The wish prompt unread or its press dropped (Leo
+                    # 2026-10-20 「讀不到也要有備案」): the game's talk key F
+                    # wishes next to the statue; the daily row going away
+                    # proves it.
+                    talked = True
+                    self.log_info("广场女神像：许愿提示点不到也读不到，改按 F 键许愿。")
+                    if self.tap_key(GODDESS_TALK_KEY, after_sleep=2.0) and (
+                        self._wait_for_daily_navigation_to_disappear(
+                            timeout=float(self.config.get("女神像完成确认等待秒数", 8.0))
+                        )
+                    ):
+                        return True
+                    idle_since = monotonic()
+                    self.sleep(interval)
+                    continue
                 if monotonic() - idle_since >= STUCK_SECONDS and (
                     point is not None or renav_left <= 0
                 ):
@@ -794,6 +906,15 @@ class SquareGoddessTask(BaseBD2Task):
                             frame_height,
                             after_sleep=2.0,
                         )
+                        idle_since = monotonic()
+                    elif click_count or talked:
+                        # E only walks while the wish is still open (Leo
+                        # 2026-10-20); after a wish press it does nothing.
+                        renav_left -= 1
+                    else:
+                        renav_left -= 1
+                        self.log_info("广场女神像：许愿提示迟迟未出现，每日导航读不到，改按 E。")
+                        self._tap_row_key()
                         idle_since = monotonic()
                     last_navigation_at = monotonic()
                 self.sleep(interval)
@@ -846,12 +967,15 @@ class SquareGoddessTask(BaseBD2Task):
             prayer, _ = self._ocr_pattern_click_point(
                 frame, GODDESS_PRAY_PATTERNS, name="许愿完成复核", roi=None
             )
-            square = self._passes(
-                self._match(frame, FANTASIA_SQUARE_TEMPLATE), FANTASIA_SQUARE_TEMPLATE
-            )
-            # Only after an OCR-confirmed prayer click: require a visible square,
-            # no task row and no prayer prompt across multiple fresh frames.
-            if observation.state == "absent" and prayer is None and square:
+            # Only after a wish press: the prompt and the goddess row both gone
+            # for 2 s.  The square's bottom bar, or the 每日奖励 title of other
+            # rows, need not show (player report 2026-10-20: wished, then the
+            # tool stood there minutes and called it unfinished).
+            if (
+                observation.state not in ("ready", "ambiguous")
+                and prayer is None
+                and not is_loading_dark(frame)
+            ):
                 now = monotonic()
                 if absent_since is not None and now - absent_since >= 2.0:
                     return True
@@ -1028,7 +1152,7 @@ class SquareGoddessTask(BaseBD2Task):
         2026-10-15 「我說的10秒是卡死 或者辨識不到」).  2K 10-15: the square
         came 11 s after the click and 「向女神像许愿」 was already up while its
         picture had not matched yet, so the wish prompt counts as arrived."""
-        wait = load_wait(monotonic(), timeout)
+        wait = load_wait(monotonic(), timeout, before=scene_at_press(self))
         last_score = -1.0
         while True:
             frame = self.capture_frame()
@@ -1240,14 +1364,6 @@ QUICK_SWITCH_TEMPLATE = TemplateSpec(
     # 2026-10-11, same HDR player as YES-BD2 #16: shape 0.964 / zncc 0.83 but
     # pixel 0.81 in the square, so the home click was never repeated.
     brightness_tolerant=True,
-)
-
-FANTASIA_SQUARE_TEMPLATE = TemplateSpec(
-    name="fantasia_square",
-    file_name="image/Mirror_FantasiaSquare_Ico.png",
-    threshold_key="梦幻广场阈值",
-    default_threshold=0.78,
-    roi=SquareGoddessTask._mf_roi(656, 622, 77, 66),
 )
 
 SQUARE_DAILY_ICON_TEMPLATE = TemplateSpec(

@@ -134,6 +134,61 @@ class BuildWorkflowTest(unittest.TestCase):
         self.assertIn("let _startup_check = STARTUP_CHECK.lock().await;", script)
         self.assertIn("drop(STARTUP_CHECK.lock().await);", script)
 
+    def test_launcher_asks_github_once_with_a_time_limit(self):
+        # Player report 10-17: 「Fetching all tags」 for a minute or two on
+        # every open when GitHub can't be reached (libgit2 on Windows waits
+        # 60 s per connection and never gives up on a stalled one).
+        script = (ROOT / "scripts" / "prepare_pyappify_launcher.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("if git::update_server_reachable(&git_url).await {", script)
+        self.assertIn("tokio::time::timeout(UPDATE_CHECK_LIMIT, check)", script)
+        self.assertIn(
+            "git::get_local_tags_and_current_version(repo_path).await?", script
+        )
+
+    def test_installer_running_program_check_never_blocks_on_powershell(self):
+        # Player report 10-20: a first install stopped on 「无法停止正在使用
+        # … Python/Qt 文件的进程」. Only programs really left running may stop
+        # the install, after one try with admin rights.
+        script = (ROOT / "scripts" / "prepare_pyappify_launcher.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("nsExec::ExecToLog 'powershell.exe -NoProfile", script)
+        self.assertIn('ExecShellWait "runas" "powershell.exe"', script)
+        self.assertIn("  ${ElseIf} $R2 != 0", script)
+        self.assertIn('-Encoding ASCII -NoNewline', script)
+        # A first install never starts PowerShell (Leo 10-20: players must
+        # not be asked to touch their security software).
+        self.assertIn('${AndIfNot} ${FileExists} "$INSTDIR\\data\\*.*"', script)
+        # A folder the installer can't write to is caught on the folder page.
+        self.assertIn('FileOpen $R6 "$INSTDIR\\yes-bd2-write-test.tmp" w', script)
+        pyappify = (ROOT / "pyappify.yml").read_text(encoding="utf-8")
+        self.assertIn("show_add_defender: false", pyappify)
+
+    def test_launcher_python_install_retries_a_broken_archive(self):
+        # Player report 10-21: 「Extracting archive …python-3.12.10-amd64.zip
+        # … failed」 with no reason and no try from the other source.
+        script = (ROOT / "scripts" / "prepare_pyappify_launcher.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("let sources = [&primary_url, &backup_url, &primary_url];", script)
+        self.assertIn("check_archive(archive_path)?;", script)
+        self.assertIn("if downloaded != total_size {", script)
+        self.assertIn("python.exe is missing from {} right after unpacking", script)
+        self.assertIn("安装 Python 失败（换下载来源试了 {} 次）。原因：{}", script)
+
+    def test_launcher_git_uses_the_windows_proxy(self):
+        # Player report 10-19: with Clash on, the browser reached GitHub but
+        # the launcher hung on 「Attempting to start app」: libgit2 on Windows
+        # never reads the proxy Windows is set to.
+        script = (ROOT / "scripts" / "prepare_pyappify_launcher.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("match if from_env { None } else { windows_proxy_url() } {", script)
+        self.assertIn('wide("ProxyEnable")', script)
+        self.assertIn("fn proxy_url_from_setting(setting: &str) -> Option<String> {", script)
+
     def test_launcher_log_ends_in_txt(self):
         # GitHub refused the extensionless app.2026-10-10 as an attachment.
         script = (ROOT / "scripts" / "prepare_pyappify_launcher.ps1").read_text(

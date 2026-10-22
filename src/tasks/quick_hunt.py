@@ -21,7 +21,7 @@ from src.utils.free_switch import ensure_free_switch_on
 from src.utils.home_confirmation import HOME_LEFT_COLUMN_REQUIRED_HITS
 from src.utils.ocr_numbers import pool_amount
 from src.utils.press_confirm import wait_for
-from src.utils.wait_limits import LOADING_MAX_SECONDS, is_loading_dark, load_wait
+from src.utils.wait_limits import LOADING_MAX_SECONDS, is_loading_dark, load_wait, scene_at_press
 
 # Where the free rice goes (all of it, MAX), one setting per double case
 # (Leo 2026-10-12: 「金幣雙倍時 / 史萊姆雙倍時 / 皆雙倍時: [金幣][史萊姆][狩獵場]
@@ -42,8 +42,17 @@ QUICK_HUNT_TARGET_DEFAULTS = {
 # The settings these four replace (still read once from an old config file).
 QUICK_HUNT_LEGACY_TARGET_KEYS = ("快速狩猎双倍策略", "快速狩猎资源倾向")
 
+# Which cave the torches go to (Leo 2026-10-20: 「要開放可以讓用戶選擇自己想要
+# 刷的屬性，且更新後先預設一樣刷最少的」).  最少 = the element held least, read
+# from the counts beside the cave list, as before.
+QUICK_HUNT_STONE_KEY = "圣石属性"
+QUICK_HUNT_STONE_LEAST = "最少"
+QUICK_HUNT_STONE_ELEMENTS = ("火", "水", "风", "光", "暗")
+QUICK_HUNT_STONE_CHOICES = (QUICK_HUNT_STONE_LEAST, *QUICK_HUNT_STONE_ELEMENTS)
+
 QUICK_HUNT_CHILD_CONFIG_KEYS = (
     *QUICK_HUNT_TARGET_DEFAULTS,
+    QUICK_HUNT_STONE_KEY,
     "快速狩猎模板阈值",
     "快速狩猎像素相似度阈值",
     "快速狩猎界面等待秒数",
@@ -196,7 +205,12 @@ QUICK_HUNT_DIALOG_DRAW_SECONDS = 3.0
 QUICK_HUNT_DIALOG_BUTTONS = re.compile(r"取消|MIN|MAX", re.IGNORECASE)
 QUICK_HUNT_HOME_LAST_WAIT_SECONDS = 6.0
 
-QUICK_HUNT_RESOURCE_ROI = _quick_hunt_relative_roi(1724, 80, 1602, 38)
+# The whole top-right "a/b +stock" pill.  With no stored rice/torches the
+# yellow "+…" is absent and "60/60" sits further right (x ~1718–1780): the
+# old right edge 1724 cut it to "60" and the free count read None (player
+# 问题摘要, v0.1.43, 1080p, 2026-10-17).  Only "a/b" is parsed, so the stock
+# text inside the box is ignored.
+QUICK_HUNT_RESOURCE_ROI = _quick_hunt_relative_roi(1880, 80, 1602, 38)
 # Small counters are read as if the frame were this tall (4K).
 SMALL_TEXT_HEIGHT = 2160
 
@@ -239,7 +253,12 @@ QUICK_HUNT_STONE_COUNT_ROI = _quick_hunt_relative_roi(1794, 288, 1689, 80)
 # 2026-10-10).  Leo: 「聖石如果偵測玩家收起來 就把它點開」.
 QUICK_HUNT_FOLD_BUTTON_ROI = _quick_hunt_relative_roi(1650, 78, 1800, 170)
 
-QUICK_HUNT_DOUBLE_ROI = _quick_hunt_relative_roi(168, 337, 135, 205)
+# The badges sit at about (153, 225) and (153, 321).  The box was once only
+# 33 px wide, so a picture shifted by 8 px (a 1639x921 window at 125% scale,
+# v0.1.37) read no badge at all; now it allows about 40 px either way.
+QUICK_HUNT_DOUBLE_ROI = _quick_hunt_relative_roi(100, 185, 215, 370)
+# Above this line a badge belongs to 金币, below it to 史莱姆.
+QUICK_HUNT_DOUBLE_SPLIT_Y = 273 / REFERENCE_HEIGHT
 # How long the double badges are looked for (Leo: wait at most 5 s).
 QUICK_HUNT_DOUBLE_READ_SECONDS = 5.0
 
@@ -268,8 +287,6 @@ QUICK_HUNT_HUNTING_GROUND = "狩猎场"
 QUICK_HUNT_NOT_HUNTING_GROUND = ("哥布林遗迹", "史莱姆王国", "属性洞穴")
 
 QUICK_HUNT_RETURN_POINT = (101, 55)
-
-QUICK_HUNT_STONE_ELEMENTS = ("火", "水", "风", "光", "暗")
 
 QUICK_HUNT_RETURN_MAP_PATTERNS = (
     ("野猪洞穴", re.compile(r"野猪洞穴")),
@@ -306,6 +323,7 @@ class QuickHuntConfigMixin:
     quick_hunt_default_config = {
         '执行快速狩猎': True,
         **QUICK_HUNT_TARGET_DEFAULTS,
+        QUICK_HUNT_STONE_KEY: QUICK_HUNT_STONE_LEAST,
         '快速狩猎模板阈值': 0.78,
         '快速狩猎像素相似度阈值': 0.72,
         '快速狩猎界面等待秒数': 8.0,
@@ -321,6 +339,7 @@ class QuickHuntConfigMixin:
         '金币双倍时': "只有金币航线双倍时，免费米饭全部打这里。",
         '史莱姆双倍时': "只有史莱姆航线双倍时，免费米饭全部打这里。",
         '都双倍时': "金币和史莱姆航线都双倍时，免费米饭全部打这里。",
+        QUICK_HUNT_STONE_KEY: "火把全部打这个属性的圣石洞穴；「最少」是每次自动挑目前最少的属性。",
         '快速狩猎模板阈值': "快速狩猎模板匹配最低分数。",
         '快速狩猎像素相似度阈值': "快速狩猎模板还必须达到的像素相似度。",
         '快速狩猎界面等待秒数': "等待狩猎菜单、地图和按钮出现的最长时间。",
@@ -340,6 +359,7 @@ class QuickHuntConfigMixin:
                 "sub_configs": {
                     True: [
                         *QUICK_HUNT_TARGET_DEFAULTS,
+                        QUICK_HUNT_STONE_KEY,
                         "快速狩猎模板阈值",
                         "快速狩猎像素相似度阈值",
                         "快速狩猎界面等待秒数",
@@ -361,6 +381,12 @@ class QuickHuntConfigMixin:
                     "widget": "toggle_choice",
                 }
                 for key in QUICK_HUNT_TARGET_DEFAULTS
+            },
+            # Six short options in one row; "type" stays drop_down for ok-script.
+            QUICK_HUNT_STONE_KEY: {
+                "type": "drop_down",
+                "options": list(QUICK_HUNT_STONE_CHOICES),
+                "widget": "segmented",
             },
             '快速狩猎模板阈值': {"min": 0.5, "max": 0.95, "step": 0.01},
             '快速狩猎像素相似度阈值': {
@@ -858,15 +884,9 @@ class QuickHuntFeatureMixin:
             self._status_set("快速狩猎火把", "0，跳过")
             return True
 
-        stone_counts = self._quick_hunt_stone_counts()
-        if stone_counts is None:
+        element = self._quick_hunt_stone_element()
+        if element is None:
             return False
-        element = min(QUICK_HUNT_STONE_ELEMENTS, key=stone_counts.__getitem__)
-        self._status_set(
-            "快速狩猎圣石数量",
-            "、".join(f"{name}={stone_counts[name]}" for name in QUICK_HUNT_STONE_ELEMENTS)
-            + f"；选择={element}",
-        )
         clicked = self._quick_hunt_click_ocr(
             [rf"{re.escape(element)}.?之?.?洞穴"],
             QUICK_HUNT_STONE_LIST_ROI,
@@ -880,6 +900,27 @@ class QuickHuntFeatureMixin:
             return False
         self._status_set("快速狩猎火把", "已耗尽" if result == "depleted" else "完成")
         return True
+
+    def _quick_hunt_stone_element(self) -> str | None:
+        """The element the torches go to: the player's pick, or the least held."""
+        chosen = str(self.config.get(QUICK_HUNT_STONE_KEY, QUICK_HUNT_STONE_LEAST) or "")
+        if chosen in QUICK_HUNT_STONE_ELEMENTS:
+            # A picked element needs no count read.
+            self.log_info(f"快速狩猎：圣石属性设定为{chosen}，火把全部打{chosen}属性洞穴。")
+            self._status_set("快速狩猎圣石数量", f"设定={chosen}")
+            return chosen
+        if chosen != QUICK_HUNT_STONE_LEAST:
+            self.log_info(f"快速狩猎：圣石属性的设定「{chosen}」看不懂，按最少的打。")
+        stone_counts = self._quick_hunt_stone_counts()
+        if stone_counts is None:
+            return None
+        element = min(QUICK_HUNT_STONE_ELEMENTS, key=stone_counts.__getitem__)
+        self._status_set(
+            "快速狩猎圣石数量",
+            "、".join(f"{name}={stone_counts[name]}" for name in QUICK_HUNT_STONE_ELEMENTS)
+            + f"；选择={element}",
+        )
+        return element
 
     def _quick_hunt_enter_crystal_cave(self, attempts: int = 3) -> bool:
         """Open the crystal cave panel and confirm the attribute cave list.
@@ -998,9 +1039,7 @@ class QuickHuntFeatureMixin:
             spec,
             minimum_score=vision.threshold_for(spec),
         )
-        split_y = frame.shape[0] * (
-            QUICK_HUNT_DOUBLE_ROI[1] + QUICK_HUNT_DOUBLE_ROI[3]
-        ) / 2
+        split_y = frame.shape[0] * QUICK_HUNT_DOUBLE_SPLIT_Y
         states = {"金币": False, "经验": False}
         details = []
         for match in matches:
@@ -1245,7 +1284,8 @@ class QuickHuntFeatureMixin:
             seconds = float(self.config.get("快速狩猎结算等待秒数", LOADING_MAX_SECONDS))
         except (TypeError, ValueError):
             seconds = LOADING_MAX_SECONDS
-        wait = load_wait(monotonic(), seconds)
+        # The result is itself an overlay this step reads: no popup closing.
+        wait = load_wait(monotonic(), seconds, before=scene_at_press(self), popups=False)
         while True:
             frame = self.capture_frame()
             reward_text = self._quick_hunt_ocr_text(
@@ -1480,7 +1520,7 @@ class QuickHuntFeatureMixin:
         """``load``: the text comes after a loading screen (load_wait)."""
         compiled = [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
         end_at = monotonic() + max(0.0, timeout)
-        wait = load_wait(monotonic(), timeout) if load else None
+        wait = load_wait(monotonic(), timeout, before=scene_at_press(self)) if load else None
         last_text = ""
         while True:
             frame = self.capture_frame()

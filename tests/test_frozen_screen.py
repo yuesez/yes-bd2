@@ -13,6 +13,8 @@ from src.utils.frozen_screen import (
     FROZEN_SCREEN_SECONDS,
     FrozenScreen,
     FrozenWatch,
+    LOADING_WORDS_SECONDS,
+    loading_words,
 )
 
 
@@ -68,11 +70,81 @@ class FrozenWatchTest(unittest.TestCase):
         watch.look(frame, later)
         watch.look(frame, later + FROZEN_SCREEN_SECONDS - 1)
 
+    def test_a_recognised_target_starts_the_count_over(self):
+        # Leo 2026-10-15 「10秒是卡死 或者辨識不到」: a still page being read is
+        # not stuck (a slow 1080p PC read the buy page for over 10 s).
+        watch = FrozenWatch()
+        frame = _screen()
+        limit = int(FROZEN_SCREEN_SECONDS)
+        for second in range(limit - 1):
+            watch.look(frame, float(second))
+        watch.progress()
+        for second in range(limit - 1, 2 * limit - 2):
+            watch.look(frame, float(second))
+        self.assertEqual(0, watch.ineffective)
+
     def test_paused_while_going_home(self):
         watch = FrozenWatch()
         watch.paused = 1
         for second in range(3 * int(FROZEN_SCREEN_SECONDS)):
             watch.look(_screen(), float(second))
+
+
+class LoadingWordsHoldTest(unittest.TestCase):
+    """Leo 2026-10-18 「有人電腦比較卡」: a still loading screen that is not
+    black is waited for like the black one."""
+
+    def test_loading_words(self):
+        self.assertEqual("nowloading", loading_words("NOW LOADING"))
+        self.assertEqual("连接中", loading_words("正在 连接中…"))
+        self.assertEqual("", loading_words("3rd ANNIVERSARY BROWNDUSTII 棕色尘埃2"))
+        self.assertEqual("", loading_words("我的小屋 好友 公会"))
+
+    def test_a_held_screen_waits_up_to_the_loading_cap(self):
+        watch = FrozenWatch()
+        frame = _screen()
+        now = 0.0
+        while now < FROZEN_SCREEN_SECONDS:
+            watch.look(frame, now)
+            now += 1.0
+        with self.assertRaises(FrozenScreen) as first:
+            watch.look(frame, now)
+        self.assertEqual("", str(first.exception))
+        watch.hold_for_loading("连接中")
+        while now < LOADING_WORDS_SECONDS - 1.0:
+            now += 1.0
+            watch.look(frame, now)
+        with self.assertRaises(FrozenScreen) as second:
+            watch.look(frame, LOADING_WORDS_SECONDS)
+        self.assertEqual(
+            f"画面停在「连接中」{LOADING_WORDS_SECONDS:.0f} 秒没有结束（可能网络或电脑比较慢）", str(second.exception)
+        )
+
+    def test_a_new_picture_ends_the_hold(self):
+        watch = FrozenWatch()
+        watch.hold_for_loading()
+        watch.look(_screen(), 0.0)
+        watch.look(_screen(30), 1.0)
+        self.assertFalse(watch.loading_hold)
+
+    def test_capture_frame_holds_only_for_loading_words(self):
+        for words, held in (("NOW LOADING", True), ("公会商店", False)):
+            task = object.__new__(base_module.BaseBD2Task)
+            task.next_frame = lambda: _screen()
+            task.info_set = lambda *_a: None
+            task.log_info = lambda *_a, **_k: None
+            task.ocr = lambda **_k: [SimpleNamespace(name=words)]
+            task._frozen_watch = watch = FrozenWatch()
+            watch.fired = True
+            with mock.patch.object(
+                base_module.BaseBD2Task, "capture_method_name", new_callable=mock.PropertyMock, return_value="x"
+            ):
+                if held:
+                    base_module.BaseBD2Task.capture_frame(task)
+                    self.assertTrue(watch.loading_hold)
+                else:
+                    with self.assertRaises(FrozenScreen):
+                        base_module.BaseBD2Task.capture_frame(task)
 
 
 class RunWatchedTest(unittest.TestCase):
@@ -263,3 +335,67 @@ class ProgressWaitTest(unittest.TestCase):
         wait = ProgressWait(0.0)
         black = np.full((80, 80, 3), 10, np.uint8)
         self.assertTrue(wait.over(black, LOADING_MAX_SECONDS, loading=True))
+
+
+class ChangedByPressTest(unittest.TestCase):
+    """Leo 2026-10-19 「記得我說的10秒是什麼狀況」「可以20秒」: 10 s is for a press
+    that did nothing; a screen the press changed is loading, whatever it
+    looks like (the 2K clone's bright 「FANTASIA SQUARE」 splash, cut at 10 s)."""
+
+    PAGE = np.full((90, 160, 3), 60, np.uint8)
+    SPLASH = np.full((90, 160, 3), 230, np.uint8)
+
+    def test_a_still_screen_the_press_changed_waits_twenty_seconds(self):
+        from src.utils.wait_limits import CHANGED_LOAD_SECONDS, STUCK_SECONDS, load_wait, scene
+
+        wait = load_wait(0.0, STUCK_SECONDS, before=scene(self.PAGE))
+        self.assertFalse(wait.over(self.SPLASH, 0.0))
+        self.assertFalse(wait.over(self.SPLASH, STUCK_SECONDS + 3))
+        self.assertFalse(wait.over(self.SPLASH, CHANGED_LOAD_SECONDS - 1))
+        self.assertTrue(wait.over(self.SPLASH, CHANGED_LOAD_SECONDS))
+
+    def test_a_press_that_changed_nothing_is_stuck_after_ten_seconds(self):
+        from src.utils.wait_limits import STUCK_SECONDS, load_wait, scene
+
+        for before in (scene(self.PAGE), None):
+            wait = load_wait(0.0, STUCK_SECONDS, before=before)
+            self.assertFalse(wait.over(self.PAGE, 0.0))
+            self.assertFalse(wait.over(self.PAGE, STUCK_SECONDS - 1))
+            self.assertTrue(wait.over(self.PAGE, STUCK_SECONDS))
+
+    def test_the_frozen_watch_follows_the_same_rule(self):
+        from src.utils.wait_limits import CHANGED_LOAD_SECONDS
+
+        watch = FrozenWatch()
+        watch.look(_screen(60), 0.0)
+        watch.pressed()
+        for t in range(1, int(CHANGED_LOAD_SECONDS)):
+            watch.look(_screen(230), float(t))
+        with self.assertRaises(FrozenScreen) as raised:
+            watch.look(_screen(230), CHANGED_LOAD_SECONDS + 1)
+        self.assertIn("画面换了", str(raised.exception))
+
+        watch = FrozenWatch()
+        watch.look(_screen(60), 0.0)
+        watch.pressed()
+        with self.assertRaises(FrozenScreen):
+            for t in range(1, int(FROZEN_SCREEN_SECONDS) + 2):
+                watch.look(_screen(60), float(t))
+
+    def test_capture_and_press_keep_the_screen_before_the_press(self):
+        from src.utils.wait_limits import scene, scene_at_press
+
+        task = object.__new__(base_module.BaseBD2Task)
+        frames = iter([self.PAGE, self.SPLASH])
+        task.next_frame = lambda: next(frames)
+        task.info_set = lambda *_a, **_k: None
+        cls = base_module.BaseBD2Task
+        with mock.patch.object(
+            cls, "capture_method_name", new_callable=mock.PropertyMock, return_value="x"
+        ), mock.patch.object(
+            cls, "executor", new_callable=mock.PropertyMock, return_value=SimpleNamespace()
+        ):
+            task.capture_frame()
+            task.operate(lambda: None)
+            task.capture_frame()
+        self.assertTrue(np.array_equal(scene(self.PAGE), scene_at_press(task)))

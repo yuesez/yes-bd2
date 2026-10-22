@@ -35,18 +35,20 @@ from src.utils.image_utils import (
     template_match_response,
     to_gray,
 )
-from src.utils import frame_recorder, known_popups, ocr_reread
+from src.utils import field_battle, frame_recorder, known_popups, ocr_reread
 from src.utils.frozen_screen import (
     FROZEN_SCREEN_SECONDS,
     INEFFECTIVE_PRESSES,
     FrozenScreen,
     FrozenWatch,
+    loading_sign,
 )
 from src.utils.ocr_utils import normalize_ocr_text
 from src.utils.press_confirm import POLL_SECONDS as LOOK_AGAIN_POLL_SECONDS
 from src.utils.press_confirm import SLOW_PC_GRACE_SECONDS, PressOutcome
 from src.utils.press_confirm import press_and_confirm as _press_and_confirm
 from src.utils.template_resolution import offline_template_scale
+from src.utils.wait_limits import STUCK_SECONDS, scene, set_loading_reader, set_popup_closer
 
 logger = Logger.get_logger(__name__)
 PROBE_OUTPUT_DIR = Path("probe_outputs")
@@ -71,7 +73,25 @@ KEY_TAP_SECONDS = 0.08
 # 2026-10-11), so P is never sent while 主页 shows.
 HOME_KEY = "H"
 RECENT_CARTRIDGE_KEY = "F"
+# The field F button that sends the "!" followers away, and how 镜中之战 / the
+# square look for them (Leo 2026-10-20 「先等5秒等這些靠過來」).
+FIELD_FOLLOWERS_KEY = "F"
+FIELD_FOLLOWERS_LOOK_SECONDS = 5.0
+FIELD_FOLLOWERS_GATHER_SECONDS = 5.0
+FIELD_FOLLOWERS_SETTLE_SECONDS = 1.5
+# After today's press: two frames, no waiting.
+FIELD_FOLLOWERS_QUICK_LOOK_SECONDS = 0.5
 QUICK_SWITCH_KEY = "P"
+# 广场 and 竞技场 are busy scenes where the game drops the quick-switch press
+# (player via Leo 2026-10-17 「切换卡带的时候可以点两下」): with no 卡带选择页
+# this long after the press, it is pressed once more while the button shows.
+QUICK_SWITCH_REPRESS_AFTER_SECONDS = 1.5
+# How long the button may take to read for that second press: on the open
+# 卡带选择页 it is gone, so nothing is pressed.
+QUICK_SWITCH_REPRESS_LOOK_SECONDS = 1.0
+# Before the P key: a short look whether 主页 is still up (the long home wait
+# also waits out loading and cost 10-30 s in a busy field).
+QUICK_SWITCH_HOME_LOOK_SECONDS = 3.0
 HOME_KEY_WAIT_SECONDS = 10.0
 ESCAPE_KEY_CODE = 0x1B  # VK_ESCAPE
 # The field's quick-switch (P) button, 1080p reference.
@@ -543,9 +563,24 @@ class BaseBD2Task(BaseTask):
         if frame is None:
             raise RuntimeError("未能从 BD2 截取画面。")
 
+        # Every wait asks the task looking at the game whether a still screen
+        # shows the loading ring or a loading word before calling it stuck.
+        set_loading_reader(self._loading_words_on)
+        # ...and closes a popup that covers the page it waits for.
+        set_popup_closer(self._close_popup_in_wait)
         watch = getattr(self, "_frozen_watch", None)
         if watch is not None:
-            watch.look(frame)
+            try:
+                watch.look(frame)
+            except FrozenScreen as exc:
+                # A still loading/connecting screen that is not black (slow
+                # PC or network) is waited for like the black one.
+                word = "" if watch.loading_hold else self._loading_words_on(frame)
+                if not word:
+                    raise
+                watch.hold_for_loading(word)
+                self.log_info(f"画面停着但写着「{word}」，当成加载继续等。")
+        self._last_scene = scene(frame)
         height, width = frame.shape[:2]
         self.info_set("截图方式", self.capture_method_name)
         self.info_set("游戏分辨率", f"{width}x{height}")
@@ -572,11 +607,14 @@ class BaseBD2Task(BaseTask):
         """ok-script's OCR; a small box that read nothing is read again.
 
         See ``src/utils/ocr_reread.py``: bordered, then enlarged 2× and 3×,
-        stopping at the first read that finds text.  Callers that already
-        enlarge the box themselves pass ``reread=False``.
+        stopping at the first read that finds text.  A read of only stray
+        marks counts as nothing (the v6 recognizer on a fixed-size input read
+        the player's 跑商 title as 「4」 at 0.77, where v5 read nothing and the
+        bordered read found 购买).  Callers that already enlarge the box
+        themselves pass ``reread=False``.
         """
         boxes = super().ocr(*args, **kwargs)
-        if boxes or not reread or args:
+        if not reread or args or ocr_reread.trusted(boxes):
             return boxes
         frame = kwargs.get("frame")
         if frame is None or kwargs.get("box") is not None or not ocr_reread.qualifies(frame):
@@ -660,7 +698,17 @@ class BaseBD2Task(BaseTask):
             vcenter=vcenter,
         )
 
+    def note_progress(self) -> None:
+        """A wait recognised its target: the stuck-screen watch counts again
+        from the next look (FrozenWatch.progress)."""
+        watch = getattr(self, "_frozen_watch", None)
+        if watch is not None:
+            watch.progress()
+
     def operate(self, func: Callable, block: bool = True, restore_cursor: bool = True):
+        # What the screen was before this press: a load wait tells a press
+        # that changed it (loading) from one that did nothing (wait_limits).
+        self._scene_at_press = getattr(self, "_last_scene", None)
         watch = getattr(self, "_frozen_watch", None)
         if watch is not None:
             point, self._press_point = getattr(self, "_press_point", None), None
@@ -755,8 +803,12 @@ class BaseBD2Task(BaseTask):
         See ``src.utils.press_confirm``: one more press after 1.5 s while the
         screen from before is still shown (``still_before``), never for
         presses that can spend something (``retries=0``).
+
+        Not confirmed: a known popup that swallowed the press (the 公告 list,
+        a season reward overlay) is closed and the press made once more,
+        only while the screen from before is still shown.
         """
-        return _press_and_confirm(
+        outcome = _press_and_confirm(
             label,
             press,
             confirmed,
@@ -764,6 +816,26 @@ class BaseBD2Task(BaseTask):
             log=self.log_info,
             **options,
         )
+        still_before = options.get("still_before")
+        if outcome or still_before is None or options.get("retries", 1) <= 0:
+            return outcome
+        if not self.close_known_popup(label, info_only=True):
+            return outcome
+        if confirmed():
+            return PressOutcome(True, outcome.presses, "late")
+        if not still_before():
+            return outcome
+        self.log_info(f"{label}：关掉挡住的弹窗后再按一次。")
+        again = _press_and_confirm(
+            label,
+            press,
+            confirmed,
+            sleep=self.sleep,
+            log=self.log_info,
+            **{**options, "retries": 0},
+        )
+        reason = "confirmed-after-retry" if again else again.reason
+        return PressOutcome(again.confirmed, outcome.presses + again.presses, reason)
 
     def look_again(
         self,
@@ -798,6 +870,18 @@ class BaseBD2Task(BaseTask):
             result = self.look_again(look, label, grace, popups=False)
         return result
 
+    def _loading_words_on(self, frame) -> str:
+        """The loading ring's percent or loading/connecting word the frame
+        shows, "" when none (one OCR)."""
+        try:
+            boxes = list(self.ocr(frame=frame, name="卡住前看载入字样", reread=False) or [])
+        except (TaskDisabledException, FinishedException):
+            raise
+        except Exception:
+            return ""
+        height, width = frame.shape[:2]
+        return loading_sign(boxes, width, height)
+
     def close_known_popup(self, label: str = "", *, info_only: bool = False) -> bool:
         """Close a popup that covers the page with its harmless press
         (src/utils/known_popups; never 取消 mid-task, never a spend).  True
@@ -818,6 +902,9 @@ class BaseBD2Task(BaseTask):
             known_popups.CANCEL_TEXT,
         ):
             press = None
+        if press is not None and press.key == known_popups.ESC_LABEL:
+            self.log_info(f"{label}：画面被公告列表挡住，按 Esc 关闭后再看。")
+            return bool(self.tap_escape(after_sleep=1.0))
         center = self._ocr_box_center(press.box) if press is not None else None
         if center is None:
             return False
@@ -825,6 +912,96 @@ class BaseBD2Task(BaseTask):
         self.log_info(f"{label}：画面被弹窗挡住，点击「{press.label}」关闭后再看。")
         self.operate_click(center[0] / width, center[1] / height, after_sleep=1.0)  # 不用确认：调用方接着重看页面
         return True
+
+    def leave_field_battle(self, label: str, boxes=None) -> str:
+        """A field battle on screen (src/utils/field_battle): run away from
+        it, or press 「离开」 on its result.  "none" (no battle here), "left"
+        (back on the field) or why it could not be left.
+
+        Leo 2026-10-22 「判定進戰鬥 就直接按esc 1秒按一下 最多按4下 看到有逃跑就
+        不按」 (with auto battle on, the first Esc ends it, the next opens the
+        menu)."""
+        if boxes is None:
+            boxes = self._battle_boxes()
+        button = field_battle.leave_button(boxes)
+        if button is not None:
+            return self._press_battle_leave(label, button)
+        if field_battle.flee_confirm_button(boxes) is not None:
+            # The run-away dialog already open (a press before this look).
+            self.log_info(f"{label}：逃跑确认框开着，按「逃跑」。")
+            return self._confirm_flee(label, boxes)
+        if not field_battle.in_battle(boxes):
+            return "none"
+        self.log_info(f"{label}：撞到怪进了战斗，按 Esc 叫出选单逃跑。")
+        self.info_set("野外战斗", "逃跑")
+        menu = boxes
+        for _press in range(field_battle.ESC_PRESSES_MAX):
+            if field_battle.flee_button(menu) is not None or field_battle.leave_button(menu) is not None:
+                break
+            if not self.tap_escape(after_sleep=field_battle.ESC_EVERY_SECONDS):
+                return "Esc 没有送到游戏（游戏窗口不在最前面）"
+            menu = self._battle_boxes()
+        button = field_battle.leave_button(menu)
+        if button is not None:  # it ended while we pressed
+            return self._press_battle_leave(label, button)
+        flee = field_battle.flee_button(menu)
+        if flee is None:
+            seen = "、".join(str(getattr(box, "name", "")) for box in menu[:8]) or "没读到字"
+            return (
+                f"按了{field_battle.ESC_PRESSES_MAX}次 Esc 都没看到「逃跑」（读到：{seen}）"
+            )
+        self._click_battle_box(flee, after_sleep=1.5)
+        return self._confirm_flee(label, self._battle_boxes())
+
+    def _confirm_flee(self, label: str, boxes) -> str:
+        """After 「逃跑」: press the dialog's 逃跑 (once) and wait for the map."""
+        end_at = monotonic() + STUCK_SECONDS
+        confirmed = False
+        while True:
+            confirm = field_battle.flee_confirm_button(boxes)
+            if confirm is not None and not confirmed:
+                confirmed = True
+                self.log_info(f"{label}：逃跑确认框，按「{getattr(confirm, 'name', '')}」。")
+                self._click_battle_box(confirm, after_sleep=1.5)
+                boxes = self._battle_boxes()
+                continue
+            if not field_battle.in_battle(boxes) and field_battle.flee_button(boxes) is None:
+                self.log_info(f"{label}：已逃跑，回到地图继续。")
+                return "left"
+            if monotonic() >= end_at:
+                return f"按了「逃跑」{STUCK_SECONDS:.0f}秒还在战斗画面"
+            self.sleep(0.5)
+            boxes = self._battle_boxes()
+
+    def _battle_boxes(self):
+        return list(self.ocr(frame=self.capture_frame(), name="野外战斗", reread=False) or [])
+
+    def _click_battle_box(self, box, after_sleep: float) -> bool:
+        center = self._ocr_box_center(box)
+        if center is None:
+            return False
+        frame = self.capture_frame()
+        height, width = frame.shape[:2]
+        self.operate_click(center[0] / width, center[1] / height, after_sleep=after_sleep)  # 不用确认：调用方接着看画面
+        return True
+
+    def _press_battle_leave(self, label: str, button) -> str:
+        self.log_info(f"{label}：野外战斗已结束，点击「离开」回到地图。")
+        if not self._click_battle_box(button, after_sleep=2.0):
+            return "战斗结算的「离开」位置读不到"
+        return "left"
+
+    def _close_popup_in_wait(self) -> bool:
+        """A page wait (wait_limits.load_wait) that has not seen its page:
+        close a popup covering it.  Info popups only (never 关闭/取消, which
+        could belong to a dialog the step opened itself)."""
+        if getattr(self, "_closing_popup_in_wait", False):
+            return False
+        self._closing_popup_in_wait = True
+        try:
+            return self.close_known_popup(getattr(self, "name", "") or "等待页面", info_only=True)
+        finally:
+            self._closing_popup_in_wait = False
 
     @staticmethod
     def _click_log_message(x, y, width: int, height: int, action_name: str) -> str:
@@ -1142,8 +1319,17 @@ class BaseBD2Task(BaseTask):
         ensure_home: Callable[[], bool],
         click_quick_switch: Callable[[], bool],
         confirm_quick_switch_page: Callable[[], bool],
+        *,
+        quick_switch_page_shown: Callable[[float], bool] | None = None,
+        repress_quick_switch: Callable[[], bool] | None = None,
+        home_shown: Callable[[], bool] | None = None,
     ) -> bool:
-        """Open the recent cartridge, click quick-switch, and confirm its page."""
+        """Open the recent cartridge, click quick-switch, and confirm its page.
+
+        ``quick_switch_page_shown(seconds)`` looks for the page that long,
+        ``repress_quick_switch`` presses the button only while it still reads
+        and ``home_shown`` is a short 主页 look; with them a dropped press is
+        made again at once instead of after the full page wait."""
         if not ensure_home():
             return False
 
@@ -1182,28 +1368,41 @@ class BaseBD2Task(BaseTask):
                     ensure_home=ensure_home,
                     click_quick_switch=click_quick_switch,
                 )
+        if (
+            quick_switch_opened
+            and quick_switch_page_shown is not None
+            and repress_quick_switch is not None
+            and not quick_switch_page_shown(QUICK_SWITCH_REPRESS_AFTER_SECONDS)
+        ):
+            self.info_set("当前阶段", "快速切换没反应，补点一次")
+            if repress_quick_switch():
+                self.log_info("点了快速切换按钮没看到卡带选择页，按钮还在，补点一次。")
         # Pressed but the page never showed (the game did not take the
         # click, YES-BD2 #23): the keys get their turn too.
         if quick_switch_opened and confirm_quick_switch_page():
             return True
-        return self._quick_switch_by_key(ensure_home, confirm_quick_switch_page)
+        return self._quick_switch_by_key(
+            ensure_home, confirm_quick_switch_page, home_shown=home_shown
+        )
 
     def _quick_switch_by_key(
         self,
         ensure_home: Callable[[], bool],
         confirm_quick_switch_page: Callable[[], bool],
+        home_shown: Callable[[], bool] | None = None,
     ) -> bool:
         """Last resort when the quick-switch button never read: the game's own
         keys (Leo 2026-10-11 「主頁進卡帶右下角那個P 也是快捷鍵」).  Still on 主页:
         F into the recent cartridge first.  Then P in the field, twice at most;
         P is never sent while 主页 shows (there it opens the collection)."""
-        if ensure_home():
+        home_now = home_shown or ensure_home
+        if home_now():
             self.log_info(f"还在主页，改按快捷键 {RECENT_CARTRIDGE_KEY} 进最近的卡带。")
-            if not self.tap_key(RECENT_CARTRIDGE_KEY, after_sleep=2.0) or ensure_home():
+            if not self.tap_key(RECENT_CARTRIDGE_KEY, after_sleep=2.0) or home_now():
                 self._save_flow_diagnostic("cartridge_quick_switch_failed")
                 return False
         for press in (1, 2):
-            if press > 1 and ensure_home():
+            if press > 1 and home_now():
                 break
             self.log_info(f"没认出快速切换按钮，第{press}次改按快捷键 {QUICK_SWITCH_KEY}。")
             if not self.tap_key(QUICK_SWITCH_KEY, after_sleep=1.5):
@@ -1255,7 +1454,38 @@ class BaseBD2Task(BaseTask):
         self.operate_click(x / 1920, y / 1080, after_sleep=1.0)
         return True
 
-    def dismiss_field_followers(self, appear_seconds: float = 3.0) -> str:
+    def clear_field_followers(self) -> str:
+        """The square (Leo 2026-10-20): wait 5 s in place once the "!" shows so
+        the crowd has come over, press it, and fall back to the F key.  Once
+        they were sent away today (镜中之战 runs first) there is no wait, only
+        a quick look (「鏡中之戰趕走過 工具就記錄一下 廣場就不用等了」)."""
+        from src.utils.field_followers import FOLLOWERS_DISMISSED, dismissed_today
+
+        if dismissed_today():
+            outcome = self.dismiss_field_followers(
+                appear_seconds=FIELD_FOLLOWERS_QUICK_LOOK_SECONDS,
+                use_key=True,
+                even_if_done_today=True,
+            )
+        else:
+            outcome = self.dismiss_field_followers(
+                appear_seconds=FIELD_FOLLOWERS_LOOK_SECONDS,
+                gather_seconds=FIELD_FOLLOWERS_GATHER_SECONDS,
+                use_key=True,
+            )
+        if outcome == FOLLOWERS_DISMISSED:
+            # 「點掉也要等個1.5秒 才走」 (Leo 2026-10-20).
+            self.sleep(FIELD_FOLLOWERS_SETTLE_SECONDS)
+        return outcome
+
+    def dismiss_field_followers(
+        self,
+        appear_seconds: float = 3.0,
+        *,
+        gather_seconds: float = 0.0,
+        use_key: bool = False,
+        even_if_done_today: bool = False,
+    ) -> str:
         """Send away the "!" characters that follow the player after login.
 
         Presses the field F button while it shows the "!" icon; see
@@ -1275,7 +1505,7 @@ class BaseBD2Task(BaseTask):
             mark_dismissed,
         )
 
-        if dismissed_today():
+        if dismissed_today() and not even_if_done_today:
             self.info_set("跟随角色按钮", "今日已赶走")
             return FOLLOWERS_DONE_TODAY
 
@@ -1312,11 +1542,20 @@ class BaseBD2Task(BaseTask):
             self.info_set("当前阶段", "点击F键感叹号，赶走跟随角色")
             self.operate_click(x, y, after_sleep=0.0, name="跟随角色按钮")
 
+        def press_key() -> None:
+            self.info_set("当前阶段", "点击没赶走跟随角色，改按F键")
+            self.log_info("箱庭：点了感叹号没赶走跟随角色，改按快捷键 F。")
+            self.tap_key(FIELD_FOLLOWERS_KEY)
+
+        if gather_seconds > 0:
+            self.info_set("跟随角色按钮", "等待跟随角色靠过来")
         outcome = dismiss_field_followers(
             observe,
             click,
             self.sleep,
             appear_seconds=appear_seconds,
+            gather_seconds=gather_seconds,
+            press_key=press_key if use_key else None,
         )
         if outcome == FOLLOWERS_DISMISSED:
             mark_dismissed()

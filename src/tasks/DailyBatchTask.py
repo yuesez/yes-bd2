@@ -11,6 +11,7 @@ from ok.task.exceptions import FinishedException, TaskDisabledException
 from qfluentwidgets import FluentIcon
 
 from src.tasks import problem_report, run_report, setup_check, weekly_ticks
+from src.tasks.AffinityTalkTask import AffinityTalkTask
 from src.tasks.CraftGearTask import CraftGearTask
 from src.tasks.DailyTask import DailyTask
 from src.tasks.DoomBookTask import DoomBookTask
@@ -24,6 +25,7 @@ from src.tasks.MapCollectionTask import MapCollectionTask
 from src.tasks.MapTradeTask import MapTradeTask
 from src.tasks.PVPTask import PVPTask
 from src.tasks.QuickHuntTask import QuickHuntTask
+from src.tasks.RedemptionTowerTask import RedemptionTowerTask
 from src.tasks.RestaurantTask import RestaurantStoneTask
 from src.tasks.RewardClaimTasks import MailRewardTask, MissionRewardTask, PassRewardTask
 from src.tasks.run_history import day_start_ts
@@ -33,7 +35,7 @@ from src.tasks.task_notifications import (
     suppress_task_completion_notifications,
 )
 from src.tasks.WeeklyTasks import ArcadeBrowseTask, HomePopularityTask
-from src.utils import game_process, game_size, keep_awake
+from src.utils import game_process, game_size, keep_awake, scheduled_start
 
 RUN_MODE_ALL = "all"
 RUN_MODE_INCOMPLETE = "incomplete"
@@ -43,6 +45,21 @@ _VALID_RUN_MODES = frozenset({RUN_MODE_ALL, RUN_MODE_INCOMPLETE})
 REQUESTED_RUN_MODE_VALIDITY_SECONDS = 600.0
 # 「完成日常后自动关机」的关机倒计时秒数：留出执行 shutdown /a 取消的窗口。
 SHUTDOWN_COUNTDOWN_SECONDS = 60
+# Leo 2026-10-20: the player may have the game closed once everything is done
+# with no failure (off by default); the tool says so once after the update.
+CLOSE_GAME_KEY = "完成日常后关闭游戏"
+CLOSE_GAME_NOTICE_KEY = "_关闭游戏新设定提示"
+# 跑完通知 (设置 page) shown once to players from before it (Leo 2026-10-22
+# 「用戶引導甚麼的 都要做好」); new installs are not asked.
+RUN_NOTIFY_NOTICE_KEY = "_跑完通知新设定提示"
+# 定时启动 (首页) likewise (Leo 2026-10-22, release handover: 「新功能要跳窗」).
+SCHEDULE_NOTICE_KEY = "_定时启动新设定提示"
+CLOSE_GAME_NOTE = "全部做完了，照设定关闭了游戏"
+CLOSE_GAME_FAILED_NOTE = "全部做完了，但游戏没能关掉，请自己关闭"
+# Leo 2026-10-21 「這次新增兩個功能 更新上去和以前一樣 要跳窗告訴用戶」: a
+# player from before 救赎之塔 and 亲密度谈心 is shown them once.
+NEW_DAILIES = ("救赎之塔", "亲密度谈心")
+NEW_DAILIES_NOTICE_KEY = "_救赎之塔亲密度新功能提示"
 CLONE_NO_SHUTDOWN_NOTE = "设置了做完自动关机，但这次是在桌面分身里跑（你在用电脑），所以没有关机"
 # 游戏闪退或回到标题画面后最多接着跑几次（同一次开始的一键日常里）；再有就停下。
 CRASH_RESTARTS_MAX = 2
@@ -119,10 +136,17 @@ DAILY_BATCH_CHILDREN = (
     DailyBatchChild(GACHA_CHILD_KEY, FreeGachaTask),
     DailyBatchChild("爛装强化分解", JunkGearTask),
     DailyBatchChild("每日精炼一次", DailyRefineTask),
-    DailyBatchChild("广场女神像", SquareGoddessTask),
+    # 镜中之战 first, where the "!" followers usually get sent away; then the
+    # square, and 跑商 at the square's merchant right after, so the recent
+    # cartridge is already the square (Leo 2026-10-20).
     DailyBatchChild("自动PVP", PVPTask),
+    DailyBatchChild("广场女神像", SquareGoddessTask),
     DailyBatchChild("跑商", MapTradeTask),
     DailyBatchChild("活动每日战斗", EventBattleTask),
+    # 恶魔城 救赎之塔 快速战斗 (Leo 2026-10-21).
+    DailyBatchChild("救赎之塔", RedemptionTowerTask),
+    # Leo 2026-10-21: LV20 costumes talked up to 15/15, three talks a day below.
+    DailyBatchChild("亲密度谈心", AffinityTalkTask),
     # 周常 run with the daily ones and are skipped once done this week (Leo
     # 2026-10-09, YES-BD2 issue #1: no separate 一键完成周常).  Before the
     # rewards, so the weekly missions they finish are claimed in the same run.
@@ -141,6 +165,20 @@ DAILY_BATCH_CHILDREN = (
     # the daily rewards.
     DailyBatchChild("每周跑图", MapCollectionTask),
 )
+
+# 每周跑图 runs last by default; the player can move it to the front on 首页
+# (Leo 2026-10-21), so the long map run goes first instead.
+MAP_CHILD_KEY = "每周跑图"
+MAP_FIRST_KEY = "每周跑图最先跑"
+
+
+def ordered_children(children, map_first: bool) -> tuple:
+    """``children`` with 每周跑图 moved to the front when ``map_first``."""
+    children = tuple(children)
+    if not map_first:
+        return children
+    first = tuple(child for child in children if child.config_key == MAP_CHILD_KEY)
+    return first + tuple(child for child in children if child.config_key != MAP_CHILD_KEY)
 
 
 class ChildBatchTask(BaseTask):
@@ -171,7 +209,7 @@ class ChildBatchTask(BaseTask):
         self.name = self.batch_label
         self.description = (
             "按顺序执行已开启的公会、小屋、酒馆、常客圣石、快速狩猎、抽抽乐、爛装分解、精炼、"
-            "广场、PVP、跑商、活动战斗、本周还没做的周常，最后领取任务奖励、通行证和邮件。"
+            "PVP、广场、跑商、活动战斗、救赎之塔、本周还没做的周常，最后领取任务奖励、通行证和邮件。"
         )
         self.icon = FluentIcon.COMPLETED
         self.group_name = "日常/周常"
@@ -185,7 +223,12 @@ class ChildBatchTask(BaseTask):
             {
                 "启用": True,
                 "失败后继续": True,
+                CLOSE_GAME_KEY: False,
                 "完成日常后自动关机": False,
+                CLOSE_GAME_NOTICE_KEY: False,
+                NEW_DAILIES_NOTICE_KEY: False,
+                RUN_NOTIFY_NOTICE_KEY: False,
+                SCHEDULE_NOTICE_KEY: False,
                 # Ticked on 首页 (src/ui/shell/autorun.py, Leo 2026-10-09).
                 "打开工具时自动开始": False,
                 **{key: True for key in child_keys},
@@ -197,6 +240,10 @@ class ChildBatchTask(BaseTask):
                 "失败后继续": (
                     "某个子任务失败时，先尝试回到主页（关闭弹窗、按返回、从地图回主页），"
                     "成功回到主页就继续执行后面的子任务；回不到主页才停止。"
+                ),
+                CLOSE_GAME_KEY: (
+                    "一键完成日常没有任何一项失败、且全部已启用子任务今日均已完成"
+                    "（含运行前就已完成的项目）后，关闭游戏。"
                 ),
                 "完成日常后自动关机": (
                     "一键完成日常运行成功且全部已启用子任务今日均已完成"
@@ -244,6 +291,7 @@ class ChildBatchTask(BaseTask):
         """Forget a run that was to go on after a login (闪退 or the title
         screen): Stop during the wait, or a new start by the player."""
         self._start_after_login = False
+        self._scheduled_run = False
         self._requested_run_mode_deadline = 0.0
         self._resuming_after_crash = False
         self._done_before_crash = set()
@@ -381,6 +429,13 @@ class ChildBatchTask(BaseTask):
             # The 跑完的结算 page reads this report; it is saved however the run
             # ends (Stop and errors included).
             self._begin_report(run_mode)
+            # 定时启动 started this run (Leo 2026-10-22): its own 做完关闭游戏 /
+            # 做完关机 apply too, and the report says so.
+            self._scheduled_run = self.batch_label == "一键完成日常" and (
+                scheduled_start.take_run_pending()
+            )
+            if self._scheduled_run:
+                run_report.mark("scheduled", True)
             self._report_ended = run_report.ENDED_ERROR
             try:
                 if self._setup_stops():
@@ -689,6 +744,7 @@ class ChildBatchTask(BaseTask):
             self,
             f"{self.batch_label}完成：已执行 {len(completed)} 项，跳过 {len(skipped)} 项。",
         )
+        self._maybe_close_game_after_daily(completed, pre_completed)
         self._maybe_shutdown_after_daily(completed, pre_completed)
         return True
 
@@ -916,6 +972,74 @@ class ChildBatchTask(BaseTask):
         except Exception:
             return False
 
+    def _all_done_today(
+        self,
+        completed: list[str],
+        pre_completed: list[str] | tuple[str, ...],
+        action: str,
+    ) -> bool:
+        """Every ticked child is done today (a 周常 this week); else logs why
+        ``action`` is not done.  See _maybe_shutdown_after_daily for the rules."""
+        enabled_children = [
+            child
+            for child in self.child_tasks
+            if bool(self.config.get(child.config_key, True))
+        ]
+        if not enabled_children:
+            self.log_info(f"{self.batch_label}：没有已启用子任务，不执行{action}。")
+            return False
+        from src.tasks.run_history import default_store
+
+        history = default_store()
+        for child in enabled_children:
+            if child.config_key in completed or child.config_key in pre_completed:
+                continue
+            task = self._child_task(child.task_class)
+            name = str(getattr(task, "name", None) or child.config_key)
+            if child.weekly and history.is_completed_this_week(name):
+                continue
+            if not history.is_completed_today(name):
+                self.log_info(
+                    f"{self.batch_label}：{child.config_key} 今日未完成，不执行{action}。"
+                )
+                return False
+        return True
+
+    def _scheduled_option(self, name: str) -> bool:
+        """定时启动's own 做完关闭游戏 / 做完关机, for the run it started."""
+        if not getattr(self, "_scheduled_run", False):
+            return False
+        return bool(getattr(scheduled_start.load(), name, False))
+
+    def _maybe_close_game_after_daily(
+        self,
+        completed: list[str],
+        pre_completed: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        """Leo 2026-10-20: close the game once everything is done.
+
+        Only called after a run with no failed child, so together with
+        _all_done_today this is 「全部完成無異常錯誤才關」.
+        """
+        if not bool(self.config.get(CLOSE_GAME_KEY, False)) and not self._scheduled_option(
+            "close_game"
+        ):
+            return
+        if not self._all_done_today(completed, pre_completed, "关闭游戏"):
+            return
+        try:
+            closed = game_process.close_game()
+        except Exception as exc:
+            self.log_error(f"{self.batch_label}：关闭游戏失败。", exc)
+            closed = False
+        if not closed:
+            self.log_warning(f"{self.batch_label}：{CLOSE_GAME_FAILED_NOTE}。")
+            run_report.set_notice(CLOSE_GAME_FAILED_NOTE)
+            return
+        self.info_set("状态", "今日日常已全部完成，已关闭游戏。")
+        self.log_info(f"{self.batch_label}：{CLOSE_GAME_NOTE}。")
+        run_report.set_notice(CLOSE_GAME_NOTE)
+
     def _maybe_shutdown_after_daily(
         self,
         completed: list[str],
@@ -930,31 +1054,12 @@ class ChildBatchTask(BaseTask):
         没有任何已启用子任务时不关机：全称判定对空集合为真，但一次没有
         执行任何日常的成功运行不应触发关机。
         """
-        if not bool(self.config.get("完成日常后自动关机", False)):
+        if not bool(self.config.get("完成日常后自动关机", False)) and not self._scheduled_option(
+            "shutdown"
+        ):
             return
-        enabled_children = [
-            child
-            for child in self.child_tasks
-            if bool(self.config.get(child.config_key, True))
-        ]
-        if not enabled_children:
-            self.log_info(f"{self.batch_label}：没有已启用子任务，不执行自动关机。")
+        if not self._all_done_today(completed, pre_completed, "自动关机"):
             return
-        from src.tasks.run_history import default_store
-
-        history = default_store()
-        for child in enabled_children:
-            if child.config_key in completed or child.config_key in pre_completed:
-                continue
-            task = self._child_task(child.task_class)
-            name = str(getattr(task, "name", None) or child.config_key)
-            if child.weekly and history.is_completed_this_week(name):
-                continue
-            if not history.is_completed_today(name):
-                self.log_info(
-                    f"{self.batch_label}：{child.config_key} 今日未完成，不执行自动关机。"
-                )
-                return
         from src.utils import clone_desktop
 
         if clone_desktop.in_clone():
@@ -985,11 +1090,43 @@ class DailyBatchTask(ChildBatchTask):
 
     untick_weekly_done = True
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set by the button on the 每周跑图 card on 首页; not shown in the forms.
+        self.default_config[MAP_FIRST_KEY] = False
+        self.config_description[MAP_FIRST_KEY] = "每周跑图放在一键日常的最前面跑。"
+
+    @property
+    def child_tasks(self):
+        # A list set on the instance (tests) is kept under the plain name, so it
+        # still wins if the instance later becomes another batch class.
+        children = self.__dict__.get("child_tasks", DAILY_BATCH_CHILDREN)
+        config = self.__dict__.get("config") or {}
+        try:
+            map_first = bool(config.get(MAP_FIRST_KEY, False))
+        except AttributeError:
+            map_first = False
+        return ordered_children(children, map_first)
+
+    @child_tasks.setter
+    def child_tasks(self, value) -> None:
+        self.__dict__["child_tasks"] = tuple(value)
+
     def load_config(self):
         # The 周常 switches used to live on 一键完成周常: keep what the player set.
         own = _read_json(_config_file(self.__class__.__name__))
         weekly = _read_json(_config_file(WeeklyBatchTask.__name__))
         super().load_config()
+        if own and CLOSE_GAME_KEY not in own:
+            # A player from before 关闭游戏 was added: shown once (Leo
+            # 2026-10-20 「更新後提醒用戶有改動」); new installs are not asked.
+            self.config[CLOSE_GAME_NOTICE_KEY] = True
+        if own and any(key not in own for key in NEW_DAILIES):
+            self.config[NEW_DAILIES_NOTICE_KEY] = True
+        if own and RUN_NOTIFY_NOTICE_KEY not in own:
+            self.config[RUN_NOTIFY_NOTICE_KEY] = True
+        if own and SCHEDULE_NOTICE_KEY not in own:
+            self.config[SCHEDULE_NOTICE_KEY] = True
         for child in self.child_tasks:
             key = child.config_key
             if child.weekly and key not in own and isinstance(weekly.get(key), bool):
@@ -1035,7 +1172,15 @@ class WeeklyBatchTask(ChildBatchTask):
         )
         self.icon = FluentIcon.DATE_TIME
         # Shutdown and auto-run on open are daily-batch features.
-        for key in ("完成日常后自动关机", "打开工具时自动开始"):
+        for key in (
+            CLOSE_GAME_KEY,
+            CLOSE_GAME_NOTICE_KEY,
+            NEW_DAILIES_NOTICE_KEY,
+            RUN_NOTIFY_NOTICE_KEY,
+            SCHEDULE_NOTICE_KEY,
+            "完成日常后自动关机",
+            "打开工具时自动开始",
+        ):
             self.default_config.pop(key, None)
             self.config_description.pop(key, None)
 

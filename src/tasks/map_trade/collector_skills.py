@@ -19,6 +19,7 @@ from src.tasks.map_trade.collector_constants import (
     SUPPRESS_ACTION,
     ACTION_AFTER_CLICK_SECONDS,
     ACTION_FAILURE_FEEDBACK,
+    ACTION_FAILURE_MARKERS,
     ACTION_FEEDBACK_CHARACTER_RATIO,
     ACTION_FEEDBACK_RELATIVE_ROI,
     ACTION_FEEDBACK_SUCCESS_DELAY_SECONDS,
@@ -51,14 +52,11 @@ from src.tasks.map_trade.models import (
     DAILY_ABSORB_LIMIT,
     DAILY_SUMMON_LIMIT,
     DAILY_SUPPRESS_LIMIT,
+    SNOW_CARD_IDS,
     CollectionMapRole,
     MatchResult,
 )
 from src.tasks.map_trade.vision import parse_used_limit
-
-# Cards whose battle areas need 压制 even after 吸收/召集 read grey: the
-# card's badge only completes with it (记忆边缘, Leo 2026-10-15).
-SUPPRESS_EVEN_WHEN_DONE_CARDS = frozenset({"Q_ep5"})
 
 # Used to split a count read without its slash ("7180" -> 7/80) until the
 # HUD has shown today's limit (see ``_known_limit``).
@@ -79,6 +77,11 @@ SKILL_INTERVAL_KEY = "技能间隔秒数"
 SKILL_INTERVAL_DEFAULT = PIPELINE_CLICK_INTERVAL
 SKILL_INTERVAL_RANGE = (0.5, 2.0)
 PIPELINE_RECHECK_SECONDS = 0.6
+# Looks at a just-pressed icon that did not read at all, ~2 s in total: the
+# press's own effect can cover the skill bar for a moment (Leo 2026-10-20,
+# ch11 战斗区域1: 吸收 read "absent" right after the press, grey on the
+# frames after).
+POST_PRESS_ICON_RECHECKS = 3
 # A press the game did not take (a player 2026-10-09: 「召集点的太快了经常点
 # 不上失败」) is pressed once more after a pause, and then taken as done
 # (Leo: 「补按后 你就不要管了」).
@@ -108,6 +111,9 @@ LOCAL_DONE_STATES = frozenset({"local_done", "pending", "settled", "preexisting_
 SLOT_ICON_ABOVE_COUNT = 10 / 1080
 # Pause before looking for a late 探查 countdown and pressing it once more.
 SEARCH_RETRY_PAUSE_SECONDS = 1.0
+# Digits over a still-bright 探查 glyph must tick down within this pause.
+SEARCH_TICK_CONFIRM_SECONDS = 1.2
+SEARCH_TICK_MAX_DROP = 3
 SLOT_ICON_SIZE = 70 / 1080
 
 
@@ -495,7 +501,17 @@ class SkillExecutionMixin:
             ]
             best_failure = max(failure_matches, default=(0.0, ""))
             best_success = max(success_matches, default=(0.0, ""))
-            if best_failure[0] >= ACTION_FEEDBACK_CHARACTER_RATIO:
+            # Characters are counted, not their order, so the success toast
+            # plus the game's second line can hold a failure phrase's
+            # characters too: 「升星天赋技能后，可获得经验值。召集带奖励的战场
+            # 怪物。」 holds 8 of 「无可召集的战场怪物」's 9 (2560x1440 player
+            # 2026-10-20, 召集 reported failed and the map blocked).  A failure
+            # phrase wins only with its 无/没 in the text, or when no success
+            # phrase is there.
+            failure_said = any(marker in normalized for marker in ACTION_FAILURE_MARKERS)
+            if best_failure[0] >= ACTION_FEEDBACK_CHARACTER_RATIO and (
+                failure_said or best_success[0] < ACTION_FEEDBACK_CHARACTER_RATIO
+            ):
                 best = SkillFeedbackObservation(
                     text,
                     "failure",
@@ -713,9 +729,9 @@ class SkillExecutionMixin:
                 return False
             self.task.sleep(SEARCH_COUNTDOWN_INTERVAL)
 
-    def _search_running(self) -> bool:
+    def _read_search_countdown(self, frame) -> int | None:
         text = self.vision.ocr_text(
-            self.vision.capture(),
+            frame,
             "探查倒计时",
             relative_roi=SEARCH_COUNTDOWN_RELATIVE_ROI,
             target_height=1080,
@@ -723,7 +739,35 @@ class SkillExecutionMixin:
         )
         countdown = re.sub(r"\D", "", text)
         self._status("探查倒计时", countdown or "-")
-        return bool(SEARCH_COUNTDOWN_PATTERN.fullmatch(countdown))
+        if not SEARCH_COUNTDOWN_PATTERN.fullmatch(countdown) or int(countdown) <= 0:
+            return None
+        return int(countdown)
+
+    def _search_running(self) -> bool:
+        """True only for a live 探查 countdown.
+
+        Leo 2026-10-19 (第三章): 吸收 was pressed with 探查 never started
+        (探查拾取物 0/7).  Every "探查 already runs, don't press" decision
+        rests on this one check, and it trusted any 1-3 digits OCR found in
+        the slot.  The digits cover the glyph while 探查 runs, so digits with
+        the idle glyph still showing must also tick down to count.
+        """
+        frame = self.vision.capture()
+        first = self._read_search_countdown(frame)
+        if first is None:
+            return False
+        detection = self.action_icons.detect(frame, SEARCH_ICON)
+        if detection.state is not ActionIconState.AVAILABLE:
+            return True
+        self.task.sleep(SEARCH_TICK_CONFIRM_SECONDS)
+        second = self._read_search_countdown(self.vision.capture())
+        if second is not None and 0 < first - second <= SEARCH_TICK_MAX_DROP:
+            return True
+        self.task.log_info(
+            f"探查：栏位读到数字 {first}→{second if second is not None else '-'}，"
+            "但探查图标仍可按且数字没有倒数，不算进行中。"
+        )
+        return False
 
     def _absorb_used_up(
         self, *, card_id: str, map_role: CollectionMapRole
@@ -829,6 +873,7 @@ class SkillExecutionMixin:
         # wait / verify one at a time, ~10 s per battle map at 2K).
         self._missed_presses = set()
         self._pressed_again = set()
+        self._records_from_this_visit = False
         results = self._use_actions_pipelined(actions, card_id=card_id, map_role=map_role)
         missed = next((result for result in results if not result.completed), None)
         if missed is not None and missed.press_again:
@@ -839,6 +884,7 @@ class SkillExecutionMixin:
                 f"{missed.message}；按钮还亮着，等{PRESS_AGAIN_PAUSE_SECONDS:.1f}秒补按一次",
             )
             self._pressed_again = set(self._missed_presses)
+            self._records_from_this_visit = True
             self.task.sleep(PRESS_AGAIN_PAUSE_SECONDS)
             results = self._use_actions_pipelined(actions, card_id=card_id, map_role=map_role)
         for result in results:
@@ -880,14 +926,14 @@ class SkillExecutionMixin:
         results: list[SkillExecutionResult] = []
         armed: list[tuple[SkillAction, object, ActionIconDetection, tuple[int, int]]] = []
         map_done = False
+        self._snow_card = card_id in SNOW_CARD_IDS
         for action in actions:
-            if map_done and action.name == SUPPRESS_ACTION.name and (
-                card_id in SUPPRESS_EVEN_WHEN_DONE_CARDS
-                and map_role != CollectionMapRole.MAIN_AREA
-            ):
+            if map_done and action.name == SUPPRESS_ACTION.name:
                 # Leo 2026-10-15 「活動卡帶記憶邊緣 戰鬥區 就算沒資源能吸收 也要按
-                # 壓制」: 2K, grey 吸收/召集 on its battle area skipped 压制 and
-                # the card stayed unfinished.  压制 is judged on its own icon.
+                # 壓制」, and 10-16 the same on 戏水女王 and 角色卡7: grey
+                # 吸收/召集 on a battle area skipped 压制 and the card stayed
+                # unfinished.  压制 is judged on its own icon on every card
+                # (a card is only entered while its badges are unfinished).
                 map_done = False
             if map_done and action.name != SUMMON_ACTION.name:
                 # Leo 2026-10-07: a grey 吸收 (with 探查 on) means the map was
@@ -939,7 +985,9 @@ class SkillExecutionMixin:
             # 2026-09-29: a lone 吸收 read "absent" right after the click);
             # no longer than it takes to read grey.
             last = clicked[-1][0]
-            if last.name == SUPPRESS_ACTION.name:
+            if self._toast_is_enough(clicked[-1][3]):
+                pass  # snow card: the success toast is the proof
+            elif last.name == SUPPRESS_ACTION.name:
                 self.task.sleep(ACTION_FEEDBACK_SUCCESS_DELAY_SECONDS)
             else:
                 self._icon_state_within(
@@ -947,16 +995,9 @@ class SkillExecutionMixin:
                 )
         verified = []
         for action, detection, before, feedback in clicked:
-            _post_frame, post_detection = self._detect_action_icon(
-                action.icon,
-                require_stable=True,
+            _post_frame, post_detection = self._post_press_icon(
+                action.icon, rechecks=0 if self._toast_is_enough(feedback) else None
             )
-            if post_detection.state in {ActionIconState.ABSENT, ActionIconState.UNKNOWN}:
-                self.task.sleep(PIPELINE_RECHECK_SECONDS)
-                _post_frame, post_detection = self._detect_action_icon(
-                    action.icon,
-                    require_stable=True,
-                )
             self._report_icon_detection(action, post_detection)
             result = self._finish_after_click(
                 action,
@@ -1004,9 +1045,11 @@ class SkillExecutionMixin:
     def _settle_before_next_press(self, clicked, next_action, last_click_at):
         """Wait until the game took the last press and the next skill is
         ready (YES-BD2 #23).  Returns the time the interval counts from."""
-        action, detection, before, _feedback = clicked[-1]
+        action, detection, before, feedback = clicked[-1]
         if action.name == SUPPRESS_ACTION.name:
             # 压制 can stay bright after a press (monsters come back).
+            return last_click_at
+        if self._toast_is_enough(feedback):
             return last_click_at
         pressed_again = getattr(self, "_pressed_again", None)
         if pressed_again is None:
@@ -1051,19 +1094,40 @@ class SkillExecutionMixin:
     ):
         """(early result, None) or (None, (action, frame, detection, before))."""
         existing = self.progress.get_action_record(card_id, map_role, action.name)
-        early = self._existing_record_outcome(action, existing)
-        if early is not None:
-            return early, None
+        if getattr(self, "_records_from_this_visit", False):
+            # The second pass on the same map: what the first pass just
+            # recorded stands (its icon may still be dimming).
+            early = self._existing_record_outcome(action, existing)
+            if early is not None:
+                return early, None
         frame, detection = self._detect_fresh_action_icon(action, existing)
         self._report_icon_detection(action, detection)
+        bright = detection.state is ActionIconState.AVAILABLE and detection.stable
+        if bright and existing is not None:
+            # The game shows the skill still to press: an older record that
+            # calls it done or pending is let go (Leo 2026-10-20 「以遊戲為
+            # 準」; a record written from a press that did not take kept the
+            # card's retry from pressing anything).  A used skill greys out,
+            # so a press here is never charged twice (Leo 2026-10-07).
+            self.progress.mark_action_void(
+                card_id, map_role, action.name, "游戏图标还亮着，照游戏画面再按"
+            )
+            self._status(f"{action.name}状态", "记录说做过，但游戏图标还亮着，照游戏再按")
+            existing = self.progress.get_action_record(card_id, map_role, action.name)
+        else:
+            early = self._existing_record_outcome(action, existing)
+            if early is not None:
+                return early, None
         if (
             detection.state in {ActionIconState.AVAILABLE, ActionIconState.USED}
             and not detection.stable
         ):
             return SkillExecutionResult(False, message=f"{action.name}图标未达到跨帧稳定确认"), None
-        # A pending ARMED/CLICKED record is settled by the count first (its
-        # icon may read bright or not at all on some maps).
-        by_count = self._resume_by_count(action, existing, card_id=card_id, map_role=map_role)
+        # A pending ARMED/CLICKED record whose icon is not bright is settled
+        # by the count first (its icon may read nothing on some maps).
+        by_count = None if bright else self._resume_by_count(
+            action, existing, card_id=card_id, map_role=map_role
+        )
         if by_count is not None:
             return by_count, None
         resumed = self._resume_pending_intent(
@@ -1225,10 +1289,7 @@ class SkillExecutionMixin:
         self.progress.mark_action_clicked(card_id, map_role, action.name)
         feedback = self._read_action_feedback(action)
         self._wait_after_feedback_match(action, feedback)
-        post_frame, post_detection = self._detect_action_icon(
-            action.icon,
-            require_stable=True,
-        )
+        post_frame, post_detection = self._post_press_icon(action.icon)
         self._report_icon_detection(action, post_detection)
         return self._finish_after_click(
             action,
@@ -1297,16 +1358,35 @@ class SkillExecutionMixin:
             )
             self._status(f"{action.name}状态", "上次点击没有生效，图标仍可按，再按一次")
             return None
-        self.progress.mark_action_blocked(
-            card_id,
-            map_role,
-            action.name,
-            "上次点击意图未决，禁止重复点击",
+        # Neither grey nor bright: the earlier press is not decided by a
+        # record any more (Leo 2026-10-20 「以遊戲為準 不要讓工具紀錄的狀況影
+        # 響跑圖」; a 2560x1440 player had ch1-3, 5, 6 all left 「今天不再按这
+        # 张图」).  The record is let go and the icon is judged as on any map.
+        self.progress.mark_action_void(
+            card_id, map_role, action.name, "上次点击没确认，照游戏画面重新判断"
         )
-        return SkillExecutionResult(
-            False,
-            message=f"{action.name}上次点击意图未决，禁止重复点击",
+        self._status(f"{action.name}状态", "上次点击没确认，照游戏画面重新判断")
+        return None
+
+    def _toast_is_enough(self, feedback) -> bool:
+        """On a snow card the game's success toast proves the press; its
+        icon is not waited on (``SNOW_CARD_IDS``)."""
+        return bool(getattr(self, "_snow_card", False)) and (
+            getattr(feedback, "outcome", None) == "success"
         )
+
+    def _post_press_icon(
+        self, icon: ActionIconSpec, rechecks: int | None = None
+    ) -> tuple[object, ActionIconDetection]:
+        """The pressed icon's state, looked at again while it does not read
+        at all (the press's effect covering the bar for a moment)."""
+        frame, detection = self._detect_action_icon(icon, require_stable=True)
+        for _ in range(POST_PRESS_ICON_RECHECKS if rechecks is None else rechecks):
+            if detection.state not in {ActionIconState.ABSENT, ActionIconState.UNKNOWN}:
+                break
+            self.task.sleep(PIPELINE_RECHECK_SECONDS)
+            frame, detection = self._detect_action_icon(icon, require_stable=True)
+        return frame, detection
 
     def _grey_with_search_on(self, action, frame, detection, map_role):
         """(frame, detection, failure): a grey icon means "done" only while
@@ -1466,20 +1546,14 @@ class SkillExecutionMixin:
             self._status(f"{action.name}状态", f"这张图已经做过（{feedback.text}），不扣次数")
             return SkillExecutionResult(True, after[0] >= after[1], "这张图已经做过")
         if feedback.outcome == "failure":
-            if post_detection.state is ActionIconState.AVAILABLE:
-                self.progress.mark_action_void(
-                    card_id,
-                    map_role,
-                    action.name,
-                    feedback.text,
-                )
-            else:
-                self.progress.mark_action_blocked(
-                    card_id,
-                    map_role,
-                    action.name,
-                    feedback.text or "失败反馈与图标状态冲突",
-                )
+            # Never a block for the day: the next visit judges the icon
+            # (grey = done, bright = press) (Leo 2026-10-20).
+            self.progress.mark_action_void(
+                card_id,
+                map_role,
+                action.name,
+                feedback.text or "失败反馈与图标状态冲突",
+            )
             return SkillExecutionResult(
                 False,
                 (after[0] >= after[1]) if after is not None else False,
@@ -1520,7 +1594,27 @@ class SkillExecutionMixin:
         # whatever the count read or the toast showed.  The count is then
         # checked on a later frame.
         greyed_by_press = icon_used and detection.state is ActionIconState.AVAILABLE
-        if (
+        # The game's own success toast after pressing a bright icon that no
+        # longer reads bright: the press took, even when the icon and the
+        # count could not be read right then (Leo 2026-10-20 「為什麼還會有
+        # 吸收执行证据不一致」: ch11 战斗区域1 吸收, toast 「吸收周围的拾取物」,
+        # icon "absent" on the post-press look and grey on later frames).
+        # The count is checked on a later frame as with any pending press.
+        toast_took = (
+            feedback.outcome == "success"
+            and detection.state is ActionIconState.AVAILABLE
+            and (
+                post_detection.state in {ActionIconState.ABSENT, ActionIconState.UNKNOWN}
+                # On snow a used icon can still read bright.
+                or self._toast_is_enough(feedback)
+            )
+        )
+        if toast_took:
+            self._status(
+                f"{action.name}状态",
+                f"游戏提示成功（{feedback.text}），按后图标一时没认出，次数稍后再对",
+            )
+        if toast_took or (
             icon_used and (feedback_success or count_proves or impossible_read)
         ) or greyed_by_press or (count_proves and post_window_stable):
             # A valid absolute snapshot is settled immediately; any

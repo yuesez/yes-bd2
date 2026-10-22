@@ -3,7 +3,7 @@
     # The version our patched launcher reports. Installed launchers replace
     # themselves only with a higher one (ok's update_pyappify), so bump this
     # whenever the launcher patches below change.
-    [string]$LauncherVersion = "1.2.8",
+    [string]$LauncherVersion = "1.2.10",
     [string]$BuildDir = "pyappify_build",
     [ValidateSet("zlib", "lzma")]
     [string]$NsisCompression = "lzma",
@@ -160,9 +160,149 @@ function Update-InstallerNsiTemplate {
   reinst_done:
 '@
 
+    # Player report 2026-10-20: both installers stopped on 「无法停止正在使用
+    # d:\yes-bd2 中 Python/Qt 文件的进程」 after a blue PowerShell window, and a
+    # restart didn't help. The installer runs without admin rights, but the
+    # launcher asks for admin (uac: true), so an old launcher or tool still
+    # running from the install folder can't be stopped by it; and security
+    # software that blocks PowerShell made the same check fail. Now the check
+    # runs hidden; what is left gets one more try with admin rights (one UAC
+    # prompt); the message names what is still running; and when PowerShell
+    # can't run at all the install carries on (a file that is really in use
+    # still gets NSIS's own retry prompt when it is written).
+    # Leo 2026-10-20: players must never be asked to touch their security
+    # software, and an installer that starts PowerShell with a policy bypass
+    # is exactly what such software flags. Only an earlier install can have
+    # programs running from the folder, so a first install skips the check and
+    # never starts PowerShell.
+    $killFirstInstallSearch = @'
+Function KillInstallDirExecutables
+  ${IfNot} ${FileExists} "$INSTDIR\*.*"
+    Return
+  ${EndIf}
+'@
+    $killFirstInstallReplacement = @'
+Function KillInstallDirExecutables
+  ${IfNot} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${AndIfNot} ${FileExists} "$INSTDIR\data\*.*"
+    Return
+  ${EndIf}
+'@
+    # Player reports 2026-10-19/20: installs to a folder the player picked on
+    # D: or F: stopped on 「无法打开要写入的文件 …\yes-bd2.exe」. The installer has
+    # no admin rights, and some drives only let administrators write. The
+    # folder is now tried when the player leaves the folder page; one that
+    # can't be written keeps them there with a message naming the default
+    # place, instead of failing halfway through the install.
+    $dirWritableSearch = @'
+ascii_check_done:
+  ; If we reach this point, the directory is valid.
+FunctionEnd
+'@
+    $dirWritableReplacement = @'
+ascii_check_done:
+  ; The folder must be writable without admin rights: this installer has none.
+  StrCpy $R5 0
+  ${IfNot} ${FileExists} "$INSTDIR\*.*"
+    StrCpy $R5 1
+  ${EndIf}
+  ClearErrors
+  CreateDirectory "$INSTDIR"
+  FileOpen $R6 "$INSTDIR\yes-bd2-write-test.tmp" w
+  ${If} ${Errors}
+    ${If} $R5 == 1
+      RMDir "$INSTDIR"
+    ${EndIf}
+    ${If} $LANGUAGE == 2052
+      MessageBox MB_OK|MB_ICONEXCLAMATION "这个位置没有写入权限，装不进去：$\r$\n$INSTDIR$\r$\n$\r$\n请换一个位置，例如默认位置：$\r$\n$LOCALAPPDATA\${PRODUCTNAME}"
+    ${Else}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "This folder can't be written to:$\r$\n$INSTDIR$\r$\n$\r$\nPlease choose another one, for example the default:$\r$\n$LOCALAPPDATA\${PRODUCTNAME}"
+    ${EndIf}
+    Abort
+  ${EndIf}
+  FileClose $R6
+  Delete "$INSTDIR\yes-bd2-write-test.tmp"
+  ${If} $R5 == 1
+    RMDir "$INSTDIR"
+  ${EndIf}
+FunctionEnd
+'@
+    $killParamSearch = @'
+  FileWrite $R1 "  [string]$$InstallerPath$\r$\n"
+'@
+    $killParamReplacement = @'
+  FileWrite $R1 "  [string]$$InstallerPath,$\r$\n"
+  FileWrite $R1 "  [string]$$ReportPath$\r$\n"
+'@
+    $killReportSearch = @'
+  FileWrite $R1 "if ($$remaining.Count -gt 0) { exit 2 }$\r$\n"
+'@
+    $killReportReplacement = @'
+  FileWrite $R1 "if ($$remaining.Count -gt 0) {$\r$\n"
+  FileWrite $R1 "  if ($$ReportPath) { (@($$remaining | ForEach-Object { $$_.Name } | Sort-Object -Unique) -join ', ') | Set-Content -LiteralPath $$ReportPath -Encoding ASCII -NoNewline }$\r$\n"
+  FileWrite $R1 "  exit 2$\r$\n"
+  FileWrite $R1 "}$\r$\n"
+'@
+    $killRunSearch = @'
+  retry_kill_install_dir_executables:
+  DetailPrint "Stopping running executables in $INSTDIR"
+  ExecWait 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" "$EXEPATH"' $R2
+  ${If} $R2 <> 0
+    ${If} $LANGUAGE == 2052
+      MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "无法停止正在使用 $INSTDIR 中 Python/Qt 文件的进程。$\r$\n请关闭相关应用后点击“重试”。" IDRETRY retry_kill_install_dir_executables
+    ${Else}
+      MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "Some processes are still using Python/Qt files in $INSTDIR.$\r$\nClose the related app and click Retry." IDRETRY retry_kill_install_dir_executables
+    ${EndIf}
+    Abort
+  ${EndIf}
+FunctionEnd
+'@
+    $killRunReplacement = @'
+  StrCpy $R3 "$PLUGINSDIR\kill-install-dir-executables.txt"
+  retry_kill_install_dir_executables:
+  DetailPrint "Stopping running executables in $INSTDIR"
+  Delete "$R3"
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" "$EXEPATH" "$R3"'
+  Pop $R2
+  ${If} $R2 == 2
+    ; What is left most likely runs as administrator (the launcher asks for
+    ; admin) and this installer does not: stop it once more with admin rights.
+    DetailPrint "Some are still running; stopping them as administrator"
+    ExecShellWait "runas" "powershell.exe" '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$R0" "$INSTDIR" "$EXEPATH"' SW_HIDE
+    Delete "$R3"
+    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" "$EXEPATH" "$R3"'
+    Pop $R2
+  ${EndIf}
+  ${If} $R2 == 2
+    StrCpy $R4 ""
+    ClearErrors
+    FileOpen $R1 "$R3" r
+    ${IfNot} ${Errors}
+      FileRead $R1 $R4
+      FileClose $R1
+    ${EndIf}
+    ${If} $LANGUAGE == 2052
+      MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "安装位置 $INSTDIR 里还有程序在运行，关不掉：$R4$\r$\n请按 Ctrl+Shift+Esc 打开任务管理器，在「详细信息」里右键结束它们（结束进程树），再点「重试」。" IDRETRY retry_kill_install_dir_executables
+    ${Else}
+      MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "Programs in $INSTDIR are still running and could not be stopped: $R4$\r$\nEnd them in Task Manager (Details, right-click, End process tree), then click Retry." IDRETRY retry_kill_install_dir_executables
+    ${EndIf}
+    Abort
+  ${ElseIf} $R2 != 0
+    ; PowerShell could not run (blocked by security software, policy, ...):
+    ; don't stop the install over the check itself.
+    DetailPrint "Could not check for running programs ($R2); continuing."
+  ${EndIf}
+FunctionEnd
+'@
+
     $patches = @(
         @{ Description = "dangling uninstaller guard"; Search = $uninstallBranchSearch; Replacement = $uninstallBranchReplacement },
-        @{ Description = "actionable failure message"; Search = $failureMessageSearch; Replacement = $failureMessageReplacement }
+        @{ Description = "actionable failure message"; Search = $failureMessageSearch; Replacement = $failureMessageReplacement },
+        @{ Description = "install folder must be writable"; Search = $dirWritableSearch; Replacement = $dirWritableReplacement },
+        @{ Description = "running-program check: skipped on a first install"; Search = $killFirstInstallSearch; Replacement = $killFirstInstallReplacement },
+        @{ Description = "running-program check: report path"; Search = $killParamSearch; Replacement = $killParamReplacement },
+        @{ Description = "running-program check: name what is left"; Search = $killReportSearch; Replacement = $killReportReplacement },
+        @{ Description = "running-program check: admin retry, hidden, never blocks on PowerShell"; Search = $killRunSearch; Replacement = $killRunReplacement }
     )
 
     foreach ($patch in $patches) {
@@ -595,6 +735,273 @@ $appService = Replace-Once $appService `
      "    AUTO_START_CANCELLED.store(true, AtomicOrdering::SeqCst);") `
     "start after the update check"
 
+# The launcher sat a minute or two on 「Fetching all tags」 before the tool
+# opened (player report 2026-10-17, still on v0.1.30 with v0.1.44 out). Every
+# open asked GitHub three times (fetch, tag fetch, tag list), and on Windows
+# libgit2 waits 60 s for each connection that never opens and forever for one
+# that stops sending: the read timeout set above only works with the
+# non-Windows transport. The startup check now asks GitHub once with a short
+# time limit first; when it doesn't answer, the installed version starts right
+# away. When it answers, one fetch brings the branches and tags, the tag list
+# is read from disk, and a fetch still going after 90 s carries on in the
+# background while the installed version starts.
+$gitRs = Replace-Once $gitRs `
+    (@'
+#[tauri::command]
+pub async fn get_tags_and_current_version(
+'@ -replace "`r`n", "`n") `
+    (@'
+/// Whether the update server answers at all within a few seconds; the git
+/// download itself can't be given a time limit on Windows.
+pub async fn update_server_reachable(git_url: &str) -> bool {
+    let url = format!(
+        "{}/info/refs?service=git-upload-pack",
+        git_url.trim_end_matches('/')
+    );
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!("Could not build the update server check, fetching anyway: {}", e);
+            return true;
+        }
+    };
+    // Any answer counts: only a connection that fails or times out means
+    // the git fetch would hang too.
+    match client.get(&url).send().await {
+        Ok(_) => true,
+        Err(e) => {
+            warn!("Update server {} did not answer: {}", git_url, e);
+            false
+        }
+    }
+}
+
+/// The tags and the installed version from the copy on disk, without asking
+/// the update server. Takes no repository lock: an update check past its time
+/// limit may still hold it while the installed version starts.
+pub async fn get_local_tags_and_current_version(
+    repo_path: PathBuf,
+) -> Result<(Vec<String>, String)> {
+    task::spawn_blocking(move || -> Result<(Vec<String>, String)> {
+        let repo = open_repository(&repo_path)?;
+        let sorted_tags = get_sorted_tags_by_time(&repo)?;
+        let head_oid = repo
+            .head()
+            .context("Failed to get repo HEAD")?
+            .target()
+            .context("HEAD has no target OID")?;
+        let mut current_version_tag: Option<String> = None;
+        for tag_name in &sorted_tags {
+            let tag_ref_name = format!("refs/tags/{}", tag_name);
+            if let Ok(reference) = repo.find_reference(&tag_ref_name) {
+                if let Ok(obj) = reference.peel(ObjectType::Commit) {
+                    if obj.id() == head_oid {
+                        current_version_tag = Some(tag_name.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        let current_version = current_version_tag.unwrap_or_else(|| head_oid.to_string());
+        Ok((sorted_tags, current_version))
+    })
+    .await
+    .context("Reading the local tags panicked or was cancelled")?
+}
+
+#[tauri::command]
+pub async fn get_tags_and_current_version(
+'@ -replace "`r`n", "`n") `
+    "read the tags from disk"
+$appService = Replace-Once $appService `
+    (@'
+        if let Err(e) = ensure_repository(&app).await {
+            warn!(
+                "Could not update the repository of '{}', continuing with the local copy: {:?}",
+                app.name, e
+            );
+        }
+        let previous_known_version = app.current_version.clone();
+        let (versions, current) = git::get_tags_and_current_version(&app.name, repo_path).await?;
+'@ -replace "`r`n", "`n") `
+    (@'
+        emit_info!(app.name, "Checking for updates...");
+        let git_url = app.get_current_profile_settings().git_url.clone();
+        if git::update_server_reachable(&git_url).await {
+            // Fetches the branches and the tags; the tag list below reads them
+            // from disk instead of asking GitHub again.
+            let app_for_check = app.clone();
+            let check = tokio::spawn(async move { ensure_repository(&app_for_check).await });
+            match tokio::time::timeout(UPDATE_CHECK_LIMIT, check).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => {
+                    warn!(
+                        "Could not update the repository of '{}', continuing with the local copy: {:?}",
+                        app.name, e
+                    );
+                    emit_info!(
+                        app.name,
+                        "Cannot reach the update server; using the installed version."
+                    );
+                }
+                Ok(Err(e)) => warn!("The update check for '{}' stopped: {:?}", app.name, e),
+                Err(_) => {
+                    warn!(
+                        "The update check for '{}' took over {} s; starting with the local copy while it continues.",
+                        app.name,
+                        UPDATE_CHECK_LIMIT.as_secs()
+                    );
+                    emit_info!(
+                        app.name,
+                        "更新检查太久，先用已安装的版本。The update check is taking too long; using the installed version."
+                    );
+                }
+            }
+        } else {
+            emit_info!(
+                app.name,
+                "连不上 GitHub，先用已安装的版本；开加速器后再打开才会更新。Cannot reach GitHub; using the installed version. Turn on an accelerator to get updates."
+            );
+        }
+        let previous_known_version = app.current_version.clone();
+        let (versions, current) = git::get_local_tags_and_current_version(repo_path).await?;
+'@ -replace "`r`n", "`n") `
+    "ask GitHub once with a time limit"
+$appService = Replace-Once $appService `
+    'static AUTO_START_CANCELLED: AtomicBool = AtomicBool::new(false);' `
+    ('static AUTO_START_CANCELLED: AtomicBool = AtomicBool::new(false);' + "`n" +
+     '/// How long the startup update check may take before the installed version is used.' + "`n" +
+     'const UPDATE_CHECK_LIMIT: Duration = Duration::from_secs(90);') `
+    "update check time limit"
+
+# With an accelerator on (Clash and the like set the Windows proxy), the
+# browser reached GitHub but the launcher still sat on 「正在启动应用 ·
+# Attempting to start app」 (player report 2026-10-19, v0.1.44 with v0.2.0
+# out). libgit2 on Windows only looks at git config and the https_proxy
+# variable, never at the proxy Windows is set to, so it went to GitHub
+# directly, and a direct connection that stalls is waited on forever. git now
+# goes through the Windows proxy too, the one the browser and the update
+# server check above already use.
+$gitRs = Replace-Once $gitRs `
+    (@'
+fn create_proxy_options() -> ProxyOptions<'static> {
+    let mut proxy_opts = ProxyOptions::new();
+    proxy_opts.auto();
+    proxy_opts
+}
+'@ -replace "`r`n", "`n") `
+    (@'
+fn create_proxy_options() -> ProxyOptions<'static> {
+    let mut proxy_opts = ProxyOptions::new();
+    // A proxy given in the environment wins, as it did before (auto reads it).
+    let from_env = ["https_proxy", "HTTPS_PROXY"]
+        .iter()
+        .any(|name| std::env::var(name).map_or(false, |value| !value.trim().is_empty()));
+    match if from_env { None } else { windows_proxy_url() } {
+        Some(url) => {
+            info!("git goes through the Windows proxy {}", url);
+            proxy_opts.url(&url);
+        }
+        None => {
+            proxy_opts.auto();
+        }
+    }
+    proxy_opts
+}
+
+/// The proxy for https that Windows is set to (Settings > Network > Proxy),
+/// when it is turned on.
+#[cfg(windows)]
+fn windows_proxy_url() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    };
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let key = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
+    let enable_name = wide("ProxyEnable");
+    let server_name = wide("ProxyServer");
+    let mut enabled: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            enable_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut enabled as *mut u32 as *mut core::ffi::c_void,
+            &mut size,
+        )
+    };
+    if status != 0 || enabled == 0 {
+        return None;
+    }
+    let mut server = vec![0u16; 2048];
+    let mut size = (server.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            server_name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            server.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut size,
+        )
+    };
+    if status != 0 {
+        warn!("The Windows proxy is on but its address could not be read ({})", status);
+        return None;
+    }
+    let length = server.iter().position(|&c| c == 0).unwrap_or(server.len());
+    proxy_url_from_setting(&String::from_utf16_lossy(&server[..length]))
+}
+
+#[cfg(not(windows))]
+fn windows_proxy_url() -> Option<String> {
+    None
+}
+
+/// Windows writes the proxy as "127.0.0.1:7890" for every protocol, or per
+/// protocol as "http=127.0.0.1:7890;https=127.0.0.1:7890;socks=127.0.0.1:7891".
+/// libgit2 takes an http proxy URL; a SOCKS-only setting gives None.
+fn proxy_url_from_setting(setting: &str) -> Option<String> {
+    let entries: Vec<&str> = setting
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let per_protocol = |protocol: &str| {
+        entries.iter().find_map(|entry| {
+            let (name, server) = entry.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case(protocol)
+                .then(|| server.trim())
+        })
+    };
+    let server = if entries.iter().any(|entry| entry.contains('=')) {
+        per_protocol("https").or_else(|| per_protocol("http"))?
+    } else {
+        *entries.first()?
+    };
+    let lower = server.to_ascii_lowercase();
+    if server.is_empty() || lower.starts_with("socks") {
+        None
+    } else if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(server.to_string())
+    } else {
+        Some(format!("http://{}", server))
+    }
+}
+'@ -replace "`r`n", "`n") `
+    "git goes through the Windows proxy"
+
 # GitHub refuses the launcher log as an attachment because it had no extension
 # (app.2026-10-10, player report 2026-10-10). New logs are app.<date>.txt; the
 # launcher never reads or deletes old logs, so app.<date> files just stay.
@@ -806,6 +1213,229 @@ $pythonEnvRs = Replace-Once $pythonEnvRs `
             .or_else(|| config.get_effective_pip_index_url());
 '@ -replace "`r`n", "`n") `
     "use the other mirror on the last try"
+
+# Download Python again, from the other source, when the archive can't be
+# unpacked (player report 2026-10-21: 「Extracting archive
+# C:\Temp\python-3.12.10-amd64.zip to D:\yes-bd2\data\apps\yes-bd2\python
+# failed」; both sources' archives are intact, so the copy on that PC was cut
+# off or blocked while being written). The launcher gave up on the first
+# extract failure without trying the backup source, and the message left out
+# why. Now each try downloads to its own file, checks the size and every
+# file's checksum before unpacking, checks python.exe is there afterwards,
+# and on any failure tries again from the other source (3 tries); the last
+# message gives the real reason.
+function Replace-Between([string]$Text, [string]$Start, [string]$End, [string]$Replacement, [string]$What) {
+    $startCount = ([regex]::Matches($Text, [regex]::Escape($Start))).Count
+    $endCount = ([regex]::Matches($Text, [regex]::Escape($End))).Count
+    if ($startCount -ne 1 -or $endCount -ne 1) {
+        throw "Launcher patch '$What' expected exactly 1 start and 1 end match but found $startCount and $endCount; update prepare_pyappify_launcher.ps1."
+    }
+    $startIndex = $Text.IndexOf($Start)
+    $endIndex = $Text.IndexOf($End)
+    if ($endIndex -lt $startIndex) {
+        throw "Launcher patch '$What' found its end before its start; update prepare_pyappify_launcher.ps1."
+    }
+    return $Text.Substring(0, $startIndex) + $Replacement + $Text.Substring($endIndex)
+}
+
+$pythonEnvRs = Replace-Between $pythonEnvRs `
+    (@'
+    let (primary_url, backup_url) = get_download_urls(&version_to_ensure)?;
+'@ -replace "`r`n", "`n") `
+    (@'
+    if !python_exe_path.exists() {
+        error!("CRITICAL:
+'@ -replace "`r`n", "`n").TrimEnd("`n") `
+    (@'
+    let (primary_url, backup_url) = get_download_urls(&version_to_ensure)?;
+    let file_name = get_filename_from_url(&primary_url)?;
+    let sources = [&primary_url, &backup_url, &primary_url];
+    let mut failures: Vec<String> = Vec::new();
+    let mut installed = false;
+    for (attempt, url) in sources.iter().enumerate() {
+        if attempt > 0 {
+            emit_info!(
+                app_name,
+                "Python could not be installed; trying again ({}/{}) from {}",
+                attempt + 1,
+                sources.len(),
+                url
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        // Its own file per try: a copy still held open (a scanner, an earlier
+        // try) can't stop the next download.
+        let archive_path = std::env::temp_dir().join(format!(
+            "yes-bd2-{}-{}-{}",
+            std::process::id(),
+            attempt + 1,
+            file_name
+        ));
+        let result =
+            install_python_archive(url, &archive_path, &install_dir, &python_exe_path, app_name)
+                .await;
+        if archive_path.exists() {
+            if let Err(remove_file_err) = fs::remove_file(&archive_path) {
+                warn!(
+                    "Failed to remove archive file {}: {}",
+                    archive_path.display(),
+                    remove_file_err
+                );
+            }
+        }
+        match result {
+            Ok(()) => {
+                installed = true;
+                break;
+            }
+            Err(e) => {
+                error!(
+                    "Installing Python from {} failed (try {}/{}): {:#}",
+                    url,
+                    attempt + 1,
+                    sources.len(),
+                    e
+                );
+                if install_dir.exists() {
+                    if let Err(remove_dir_err) = fs::remove_dir_all(&install_dir) {
+                        warn!(
+                            "Failed to remove extraction directory {}: {}",
+                            install_dir.display(),
+                            remove_dir_err
+                        );
+                    }
+                }
+                let reason = format!("{:#}", e);
+                if !failures.contains(&reason) {
+                    failures.push(reason);
+                }
+            }
+        }
+    }
+    if !installed {
+        let reasons = failures.join(" | ");
+        return Err(anyhow!(
+            "安装 Python 失败（换下载来源试了 {} 次）。原因：{}。请再按一次安装；还是不行，请把 data\\logs 里最新的文件发给我们。Installing Python {} failed {} times: {}",
+            sources.len(),
+            reasons,
+            version_to_ensure,
+            sources.len(),
+            reasons
+        ));
+    }
+    info!(
+        "Successfully installed Python {} to {}",
+        version_to_ensure,
+        install_dir.display()
+    );
+
+'@ -replace "`r`n", "`n") `
+    "install Python again from the other source when unpacking fails"
+$pythonEnvRs = Replace-Once $pythonEnvRs `
+    (@'
+#[cfg(target_os = "windows")]
+fn extract_archive(archive_path: &Path, extract_to_dir: &Path) -> Result<()> {
+'@ -replace "`r`n", "`n") `
+    (@'
+#[cfg(target_os = "windows")]
+async fn install_python_archive(
+    url: &str,
+    archive_path: &Path,
+    install_dir: &Path,
+    python_exe_path: &Path,
+    app_name: &str,
+) -> Result<()> {
+    download_file(url, archive_path, app_name).await?;
+    emit_info!(app_name, "Checking the downloaded Python archive...");
+    check_archive(archive_path)?;
+    fs::create_dir_all(install_dir).with_context(|| {
+        format!("Creating install directory {} failed", install_dir.display())
+    })?;
+    emit_info!(app_name, "Extracting Python...");
+    extract_archive(archive_path, install_dir).with_context(|| {
+        format!(
+            "Extracting archive {} to {} failed",
+            archive_path.display(),
+            install_dir.display()
+        )
+    })?;
+    if !python_exe_path.exists() {
+        return Err(anyhow!(
+            "python.exe is missing from {} right after unpacking (removed or blocked)",
+            install_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Reads every file in a zip archive once, so a broken or cut-off download
+/// is caught (each file's checksum is checked at its end) before anything
+/// is unpacked.
+#[cfg(target_os = "windows")]
+fn check_archive(archive_path: &Path) -> Result<()> {
+    if !archive_path.to_string_lossy().ends_with(".zip") {
+        return Ok(());
+    }
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("Failed to open {}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(io::BufReader::new(file)).with_context(|| {
+        format!(
+            "The downloaded archive {} is not a readable zip (broken download)",
+            archive_path.display()
+        )
+    })?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).with_context(|| {
+            format!(
+                "The downloaded archive {} is broken at file {}",
+                archive_path.display(),
+                index
+            )
+        })?;
+        let name = entry.name().to_string();
+        io::copy(&mut entry, &mut io::sink()).with_context(|| {
+            format!(
+                "The downloaded archive {} is broken at {}",
+                archive_path.display(),
+                name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn extract_archive(archive_path: &Path, extract_to_dir: &Path) -> Result<()> {
+'@ -replace "`r`n", "`n") `
+    "check the Python archive before unpacking"
+$pythonEnvRs = Replace-Once $pythonEnvRs `
+    (@'
+                last_reported_percent = percent;
+            }
+        }
+    }
+    Ok(())
+}
+'@ -replace "`r`n", "`n") `
+    (@'
+                last_reported_percent = percent;
+            }
+        }
+    }
+    file.flush()
+        .with_context(|| format!("Failed to write file {}", dest_path.display()))?;
+    if downloaded != total_size {
+        return Err(anyhow!(
+            "Download from {} stopped at {} of {} bytes",
+            url,
+            downloaded,
+            total_size
+        ));
+    }
+    Ok(())
+}
+'@ -replace "`r`n", "`n") `
+    "check the Python download is complete"
 
 Set-Content -LiteralPath $appServicePath -Value $appService -Encoding UTF8
 Set-Content -LiteralPath $pythonEnvRsPath -Value $pythonEnvRs -Encoding UTF8

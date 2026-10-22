@@ -818,12 +818,26 @@ class DailyTaskHelperTest(unittest.TestCase):
         task._wait_guild_page = lambda _timeout: ("page", "公告事项 进入公会联合战")
         task._ocr_text = lambda _frame, name: ""
         task._keyword_match_count = lambda text, keywords: 0
-        # 依次为：入口前主页确认（通过）、返回主页第 1 次确认（失败）。
-        confirm_results = iter([True, False])
+        blanks = []
+        task.operate_click = lambda x, y, **_kwargs: blanks.append((x, y))
+        # 依次为：入口前主页确认（通过）、返回主页第 1 次确认（失败）、
+        # 点空白处关弹窗后再确认（失败）。
+        confirm_results = iter([True, False, False])
         task._wait_for_home_confirmation = lambda name, **_kwargs: next(confirm_results)
 
-        self.assertFalse(DailyTask.run_guild_sign_in(task))
+        # The guild page was seen, so the sign-in is done; home is left to
+        # the recovery flow (player 2026-10-17: a popup over home made the
+        # done sign-in count as failed).
+        recoveries = []
+        with patch(
+            "src.tasks.DailyTask.recover_to_home",
+            side_effect=lambda _task: recoveries.append(1) or True,
+        ):
+            self.assertTrue(DailyTask.run_guild_sign_in(task))
         self.assertEqual([(370, 155), (100, 50)], clicks)
+        self.assertEqual(1, len(blanks))
+        self.assertEqual([1], recoveries)
+        self.assertFalse(task._home_lost_after_done)
 
     def test_guild_page_alone_counts_as_signed_in(self):
         # No 签到成功 toast (already signed in today): the page UI is enough.
@@ -834,6 +848,54 @@ class DailyTaskHelperTest(unittest.TestCase):
         texts = iter(["", "公会 公告事项 进入公会联合战 公会商店"])
         task._ocr_text = lambda _frame, name=None: next(texts)
         self.assertEqual("page", DailyTask._wait_guild_page(task, 60.0)[0])
+
+    def test_guild_return_closes_event_popup_over_home(self):
+        # 2K 桌面分身 2026-10-16: a dark 万圣节每日钻石通行证 popup over home
+        # failed the guild item although the sign-in had worked.
+        task = object.__new__(DailyTask)
+        clicks = []
+        task._click_reference = lambda *point, **_k: clicks.append(("back", point))
+        task.operate_click = lambda x, y, **_k: clicks.append(("blank", (x, y)))
+        homes = iter([False, True])
+        task._wait_for_home_confirmation = lambda *_a, **_k: next(homes)
+        task.capture_frame = lambda: None
+        task._ocr_text = lambda _frame, name=None: "万圣节每日钻石通行证 活动期间"
+        task.log_info = lambda *_a, **_k: None
+        task._status_set = lambda *_a: None
+        self.assertTrue(DailyTask._return_home_from_guild(task))
+        self.assertEqual(["back", "blank"], [kind for kind, _point in clicks])
+
+    def test_guild_return_presses_back_again_after_a_short_look(self):
+        # 桌面分身 2026-10-18: two swallowed presses cost 4 s each before.
+        task = object.__new__(DailyTask)
+        clicks = []
+        looks = []
+        task._click_reference = lambda *point, **_k: clicks.append(point)
+
+        def home(*_a, timeout=None, **_k):
+            looks.append(timeout)
+            return len(looks) == 3
+
+        task._wait_for_home_confirmation = home
+        task.capture_frame = lambda: None
+        task._ocr_text = lambda _frame, name=None: "公会商店 公告事项 进入公会联合战"
+        task.log_info = lambda *_a, **_k: None
+        task._status_set = lambda *_a: None
+        self.assertTrue(DailyTask._return_home_from_guild(task))
+        self.assertEqual(3, len(clicks))
+        self.assertEqual([2.0, 2.0, 2.0], looks)
+
+    def test_guild_return_last_press_looks_longer(self):
+        task = object.__new__(DailyTask)
+        looks = []
+        task._click_reference = lambda *_p, **_k: None
+        task._wait_for_home_confirmation = lambda *_a, timeout=None, **_k: looks.append(timeout) or False
+        task.capture_frame = lambda: None
+        task._ocr_text = lambda _frame, name=None: "公会商店 公告事项 进入公会联合战"
+        task.log_info = lambda *_a, **_k: None
+        task._status_set = lambda *_a: None
+        self.assertFalse(DailyTask._return_home_from_guild(task))
+        self.assertEqual([2.0, 2.0, 2.0, 4.0], looks)
 
     def test_guild_page_not_confirmed_times_out(self):
         task = object.__new__(DailyTask)
@@ -1269,7 +1331,7 @@ class DailyTaskHelperTest(unittest.TestCase):
 
     def test_quick_hunt_regions_preserve_all_supplied_1920_calibrations(self):
         self.assertEqual(
-            (1602 / 1920, 38 / 1080, 1724 / 1920, 80 / 1080),
+            (1602 / 1920, 38 / 1080, 1880 / 1920, 80 / 1080),  # widened 2026-10-19
             QUICK_HUNT_RESOURCE_ROI,
         )
         self.assertEqual(
@@ -1297,7 +1359,7 @@ class DailyTaskHelperTest(unittest.TestCase):
             QUICK_HUNT_MAP_SCAN_ROI,
         )
         self.assertEqual(
-            (135 / 1920, 205 / 1080, 168 / 1920, 337 / 1080),
+            (100 / 1920, 185 / 1080, 215 / 1920, 370 / 1080),
             QUICK_HUNT_DOUBLE_ROI,
         )
         self.assertEqual(
@@ -2293,6 +2355,129 @@ class DailyTaskHelperTest(unittest.TestCase):
         self.assertEqual(["guild", "home", "business"], calls)
         self.assertEqual("['公会签到']", infos["跳过"])
         self.assertEqual("[]", infos["失败"])
+
+    def test_failed_step_reason_names_that_step(self):
+        # Player 2026-10-17 (v0.1.42): 公会签到 failed, but the summary said
+        # 「失败：一键收菜：关闭经营管理弹窗」, the run's last log line.
+        task, _calls, infos = self._run_task(False, home_back=True)
+
+        def guild():
+            return DailyTask._step_failed(task, "公会入口按了2次都没进入公会页面")
+
+        task.run_guild_sign_in = guild
+        self.assertFalse(DailyTask.run(task))
+        self.assertEqual("公会签到：公会入口按了2次都没进入公会页面", task._why)
+        self.assertEqual(
+            "公会、小屋、酒馆失败：公会签到：公会入口按了2次都没进入公会页面。", infos["状态"]
+        )
+
+    def test_done_step_that_cannot_reach_home_stops_the_rest(self):
+        task, calls, infos = self._run_task(True, home_back=True)
+
+        def guild():
+            calls.append("guild")
+            with patch("src.tasks.DailyTask.recover_to_home", return_value=False):
+                return DailyTask._home_after_done(task, "公会签到")
+
+        task.run_guild_sign_in = guild
+        self.assertFalse(DailyTask.run(task))
+        self.assertEqual(["guild"], calls)
+        self.assertEqual("公会签到做完后没能回到主页，后面的没做", task._why)
+        self.assertEqual("['公会签到']", infos["完成"])
+        self.assertEqual("['小屋签到', '一键收菜']", infos["跳过"])
+
+
+class GuildSignInProofTest(unittest.TestCase):
+    """Player 2026-10-21: many popups on entry, reward not claimed, step done."""
+
+    TEMPLATES = "recognition-assets/template-assets/"
+
+    def _frame_with(self, name):
+        import cv2
+
+        icon = cv2.imread(self.TEMPLATES + name, cv2.IMREAD_COLOR)
+        frame = np.full((300, 300, 3), 40, dtype=np.uint8)
+        h, w = icon.shape[:2]
+        frame[100 : 100 + h, 100 : 100 + w] = icon
+        return frame, MatchResult(0.9, (100, 100), (w, h), pixel_score=0.9)
+
+    def _task(self):
+        task = object.__new__(DailyTask)
+        task.config = {"公会入口阈值": 0.78}
+        task.info_set = lambda *_args, **_kwargs: None
+        task.log_info = lambda *_args, **_kwargs: None
+        task.sleep = lambda *_args, **_kwargs: None
+        task._passes = lambda result, _spec: result.score > 0
+        return task
+
+    def _marked(self, name):
+        task = self._task()
+        frame, match = self._frame_with(name)
+        task._match_best = lambda _frame, _specs: (match, GUILD_TEMPLATE)
+        return DailyTask._guild_entry_marked(task, frame)
+
+    def test_red_mark_is_seen_only_on_the_active_entry_templates(self):
+        self.assertTrue(self._marked("guild.png"))
+        self.assertTrue(self._marked("image/green/MainBotmUnionAcGE.png"))
+        self.assertFalse(self._marked("guild-finished.png"))
+        self.assertFalse(self._marked("image/green/MainBotmUnionGE.png"))
+
+    def _sign_in_task(self, marks_after):
+        task = self._task()
+        task._wait_for_home_confirmation = lambda *_args, **_kwargs: True
+        task._find_guild_entry = lambda: (True, np.zeros((10, 10, 3), dtype=np.uint8))
+        marks = iter([True, *marks_after])
+        task._guild_entry_marked = lambda _frame: next(marks)
+        task.capture_frame = lambda: np.zeros((10, 10, 3), dtype=np.uint8)
+        visits = []
+        task._visit_guild = lambda linger: visits.append(linger) or True
+        return task, visits
+
+    def test_step_is_done_once_the_mark_is_gone_from_home(self):
+        task, visits = self._sign_in_task([True, False])
+        self.assertTrue(DailyTask.run_guild_sign_in(task))
+        self.assertEqual([True], visits)
+
+    def test_mark_still_on_home_enters_the_guild_once_more(self):
+        task, visits = self._sign_in_task([True] * 50)
+        with patch("src.tasks.DailyTask.GUILD_MARK_CLEAR_SECONDS", 0.0):
+            self.assertTrue(DailyTask.run_guild_sign_in(task))
+        self.assertEqual([True, True], visits)
+
+    def test_second_visit_that_never_sees_the_guild_page_fails(self):
+        task, visits = self._sign_in_task([True] * 50)
+        results = iter([True, False])
+        task._visit_guild = lambda linger: visits.append(linger) or next(results)
+        with patch("src.tasks.DailyTask.GUILD_MARK_CLEAR_SECONDS", 0.0):
+            self.assertFalse(DailyTask.run_guild_sign_in(task))
+        self.assertEqual(2, len(visits))
+
+    def test_unmarked_entry_needs_no_mark_check(self):
+        task = self._task()
+        task._wait_for_home_confirmation = lambda *_args, **_kwargs: True
+        task._find_guild_entry = lambda: (True, None)
+        task._guild_entry_marked = lambda _frame: False
+        task._visit_guild = lambda linger: not linger
+        task._guild_mark_stays = lambda: self.fail("no mark to check")
+        self.assertTrue(DailyTask.run_guild_sign_in(task))
+
+    def _page_task(self, text):
+        task = self._task()
+        task.capture_frame = lambda: np.zeros((10, 10, 3), dtype=np.uint8)
+        task._ocr_text = lambda _frame, name: text
+        taps = []
+        task.operate_click = lambda *args, **_kwargs: taps.append(args)
+        return task, taps
+
+    def test_sign_in_words_on_another_popup_are_not_the_guild_sign_in(self):
+        task, taps = self._page_task("七日登录 签到成功 领取")
+        self.assertIsNone(DailyTask._wait_guild_page(task, 0.0)[0])
+        self.assertEqual(1, len(taps))
+
+    def test_sign_in_panel_over_the_guild_page_counts(self):
+        task, taps = self._page_task("签到成功 奖励已发放至邮箱 公会商店")
+        self.assertEqual("toast", DailyTask._wait_guild_page(task, 0.0)[0])
+        self.assertEqual([], taps)
 
 
 if __name__ == "__main__":

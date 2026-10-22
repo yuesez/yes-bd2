@@ -39,14 +39,6 @@ BATCH_KEY = "跑商"
 LAST_DISH = "街头烤鸡肉串"
 
 
-def _shop_text(shop: str) -> str:
-    code, _, name = str(shop).partition(":")
-    if not name:
-        return str(shop)
-    kind = {"S": "剧情卡", "R": "角色卡", "E": "活动卡"}.get(code[:1], "")
-    return f"{t(kind)} {code[1:]} · {t(name)}" if kind else t(name)
-
-
 class DishTile(QWidget):
     """A dish picture; picked ones carry their cooking order, others are grey."""
 
@@ -348,8 +340,10 @@ class TradePage(Page):
         head.addWidget(IconTile(icon_name, 30, 17, kind="trade"))
         head.addWidget(Text(title, "h2"))
         if hint:
-            head.addWidget(Text(hint, "muted"))
-        head.addStretch(1)
+            # Long in some languages (Korean was cut, 2026-10-22 check): «…» and a tooltip.
+            head.addWidget(Text(hint, "muted", elide=True), 1)
+        else:
+            head.addStretch(1)
         done = Text("", "pill")
         done.setProperty("tone", "ok")
         done.hide()
@@ -373,18 +367,22 @@ class TradePage(Page):
 
     def _build_buy(self) -> None:
         column = self.buy_card.column
+        # The cartridge and the merchant on one line, the words under them
+        # across the card: between the two pictures 「Chapter 1 Merchant」 was
+        # cut, then one word a line (2026-10-22 check).
         row = hbox(None, (0, 0, 0, 0), 12)
         picture = Picture(data.cartridge_picture("S1"), fixed=QSize(84, 64))
-        row.addWidget(picture)
-        texts = vbox(None, (0, 0, 0, 0), 2)
-        texts.addWidget(Text("第一章商人", "h3"))
-        texts.addWidget(Text("砍价，买下收藏的商品", "muted", wrap=True))
-        row.addLayout(texts, 1)
+        row.addWidget(picture, 0, Qt.AlignBottom)
+        row.addStretch(1)
         self.bargain_button = StickerButton(data.bargain_picture(), 96)
         self.bargain_button.clicked.connect(self._open_bargain)
         attach_hint(self.bargain_button, t("练砍价技能"), below=True)
         row.addWidget(self.bargain_button, 0, Qt.AlignTop)
         column.addLayout(row)
+        texts = vbox(None, (0, 0, 0, 0), 2)
+        texts.addWidget(Text("第一章商人", "h3", wrap=True))
+        texts.addWidget(Text("砍价，买下收藏的商品", "muted", wrap=True))
+        column.addLayout(texts)
         self.bargain_running = QWidget()
         running = hbox(self.bargain_running, (0, 0, 0, 0), 8)
         running.addWidget(IconLabel("loader-circle", 15, "primary"))
@@ -557,7 +555,10 @@ class TradePage(Page):
     def _stop_key_hint() -> str:
         from src.ui.shell import hotkeys
 
-        return tf("按 {stop} 可随时停止，按键在设置里改", stop=hotkeys.keys()[hotkeys.STOP])
+        stop = hotkeys.keys()[hotkeys.STOP]
+        if stop == hotkeys.NONE:  # Leo 2026-10-20: the stop key can be off
+            return t("停止键已关闭，可在首页按「停止」")
+        return tf("按 {stop} 可随时停止，按键在设置里改", stop=stop)
 
     def keep_page_on_start(self) -> bool:
         """A start from here that stays on this page (循环砍价)."""
@@ -707,12 +708,7 @@ class TradePage(Page):
         for entry in entries:
             row = hbox(None, (0, 2, 0, 2), 10)
             row.addWidget(ItemIcon(entry.item, 34))
-            texts = vbox(None, (0, 0, 0, 0), 1)
-            texts.addWidget(Text(entry.item, "h3"))
-            texts.addWidget(
-                Text(tf("在 {shop} 卖", shop=_shop_text(entry.shop)), "muted", elide=True)
-            )
-            row.addLayout(texts, 1)
+            row.addWidget(Text(entry.item, "h3", elide=True), 1)
             if entry.reserve:
                 row.addWidget(Text(tf("留 {n}", n=f"{entry.reserve:,}"), "pill"))
             check = CheckBox("", entry.item in selected)
@@ -720,7 +716,6 @@ class TradePage(Page):
             self._panel_checks[entry.item] = check
             row.addWidget(check)
             self.day_layout.addLayout(row)
-        self.day_layout.addWidget(Text("取消勾选的当天不卖", "muted"))
 
     def _tick_item(self, day: int, item: str, on: bool) -> None:
         from src.tasks.map_trade.sale_days import day_items, sale_day_key

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QDialog, QFrame, QLabel, QScrollArea, QWidget
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QWidget
 
 from src.ui.shell import data, icons, motion, theme
+from src.ui.shell.floating import Floating, Panel
 from src.ui.shell.widgets import (
     Button,
     CheckBox,
@@ -80,50 +81,6 @@ class HeroIcon(QWidget):
             theme.color("on_primary"),
             2.1,
         )
-
-
-class Panel(QFrame):
-    """The floating window body: rounded, a deep soft shadow, a faint violet
-    glow along the top."""
-
-    SHADOW = 18
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-    def body(self) -> QRectF:
-        pad = self.SHADOW
-        return QRectF(self.rect()).adjusted(pad, pad - 6, -pad, -pad - 6)
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        body = self.body()
-        corner = float(theme.radius()) + 8
-        painter.setPen(Qt.NoPen)
-        layers = 12
-        for step in range(layers, 0, -1):
-            fade = 1 - (step - 1) / layers
-            painter.setBrush(theme.color("shadow", 0.05 * fade))
-            grow = step * 1.4
-            painter.drawRoundedRect(
-                body.adjusted(-grow, -grow * 0.4 + 2, grow, grow * 1.2 + 2),
-                corner + grow,
-                corner + grow,
-            )
-        path = QPainterPath()
-        path.addRoundedRect(body, corner, corner)
-        painter.fillPath(path, theme.color("card"))
-        painter.save()
-        painter.setClipPath(path)
-        top = QLinearGradient(body.topLeft(), body.topLeft() + QPointF(0, 150))
-        top.setColorAt(0.0, theme.color("primary", 0.10))
-        top.setColorAt(1.0, theme.color("primary", 0.0))
-        painter.fillRect(QRectF(body.left(), body.top(), body.width(), 150), top)
-        painter.restore()
-        painter.setPen(QPen(theme.color("line2"), 1))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(path)
 
 
 class PickTile(QWidget):
@@ -217,8 +174,12 @@ class PickTile(QWidget):
         super().mouseReleaseEvent(event)
 
 
-class RunConfirm(QDialog):
+class RunConfirm(Floating):
     """Dims the tool window and floats the choice in the middle of it."""
+
+    PANEL_WIDTH = PANEL_WIDTH - 2 * Panel.SHADOW
+    MARGIN = 2 * WINDOW_GAP
+    SPACING = 16
 
     def __init__(
         self,
@@ -228,23 +189,16 @@ class RunConfirm(QDialog):
         clone: bool = False,
         parent: QWidget | None = None,
         open_guide: Callable[[], None] | None = None,
+        close_game: bool | None = None,
     ):
         super().__init__(parent)
         self._open_guide = open_guide
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setModal(True)
-        self.setStyleSheet(theme.style_sheet())
         self._children = children
         self._done = done
         self._done_text = done_text
         self.ticks = {child.key: child.included for child in children}
         self.mode = default_mode(children, done)
-        self._open = motion.Tween(self, self._place, 220, 0.0)
-
-        self.panel = Panel(self)
-        pad = Panel.SHADOW  # the shadow is drawn inside the panel's own rect
-        column = vbox(self.panel, (pad + 28, pad - 6 + 24, pad + 28, pad + 6 + 24), 16)
+        column = self.column
 
         head = hbox(None, (0, 0, 0, 0), 14)
         head.addWidget(HeroIcon("monitor" if clone else "play"))
@@ -276,7 +230,7 @@ class RunConfirm(QDialog):
         )
         self.switch.changed.connect(self._set_mode)
         self.switch.setStyleSheet(
-            "QPushButton { min-height: 32px; padding: 0 18px; font-size: 14px; }"
+            "QPushButton { min-height: 32px; max-height: 999px; padding: 0 18px; font-size: 14px; }"
         )
         modes.addWidget(self.switch)
         modes.addStretch(1)
@@ -340,6 +294,11 @@ class RunConfirm(QDialog):
         column.addWidget(hint)
 
         buttons = hbox(None, (0, 2, 0, 0), 10)
+        # Leo 2026-10-21 「藏在...誰看的到 改放這裡」: 关闭游戏 next to 开始.
+        self.close_game = None
+        if close_game is not None:
+            self.close_game = CheckBox("全部做完且没有失败后关闭游戏", close_game)
+            buttons.addWidget(self.close_game, 0, Qt.AlignVCenter)
         buttons.addStretch(1)
         buttons.addWidget(Button("取消", "secondary", on_click=self.reject))
         self.start = Button("", "primary", "play", "lg", on_click=self.accept)
@@ -347,9 +306,6 @@ class RunConfirm(QDialog):
         column.addLayout(buttons)
 
         self._refresh()
-        if parent is not None:
-            self.setGeometry(parent.window().geometry())
-        self._place()
 
     def _to_guide(self) -> None:
         self.reject()
@@ -400,40 +356,13 @@ class RunConfirm(QDialog):
 
     # ---------------------------------------------------------------- look
 
-    def _place(self) -> None:
-        area = self.rect()
-        width = min(PANEL_WIDTH, max(380, area.width() - 2 * WINDOW_GAP))
-        self.panel.setFixedWidth(width)
+    def content_height(self, width: int) -> int:
         # Tall enough for every tile when the window has room, else the
         # tiles scroll (small screens) and the buttons stay in view.
-        self.panel.layout().activate()
-        inner = width - 2 * Panel.SHADOW - 56 - 10  # shadow, margins, list margin
+        need = super().content_height(width)
+        inner = width - 2 * Panel.SHADOW - 2 * self.PAD[0] - 10  # list margin
         lists = self.scroll.widget().layout().heightForWidth(inner)
-        need = self.panel.sizeHint().height() - self.scroll.sizeHint().height() + lists + 4
-        height = min(need, max(320, area.height() - 2 * WINDOW_GAP))
-        self.panel.setFixedHeight(height)
-        shown = float(self._open.value)
-        x = (area.width() - width) // 2
-        y = (area.height() - height) // 2 + round(14 * (1 - shown))
-        self.panel.move(x, y)
-        self.update()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._open.go(1.0)
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.fillRect(
-            self.rect(),
-            theme.color(
-                "shot", (0.62 if theme.tokens() is theme.DARK else 0.42) * float(self._open.value)
-            ),
-        )
+        return need - self.scroll.sizeHint().height() + lists + 4
 
     def mouseReleaseEvent(self, event):
         # A click on the dimmed part outside the panel is 取消.
@@ -461,7 +390,14 @@ def ask(
             if child.weekly and data.day_text(finished) != "今天":
                 when = data.day_text(finished) or when
             done_text[child.key] = when
-    dialog = RunConfirm(children, done, done_text, clone, window, open_guide)
+    from src.tasks.DailyBatchTask import CLOSE_GAME_KEY
+
+    config = getattr(batch, "config", None) or {}
+    close_game = bool(config[CLOSE_GAME_KEY]) if CLOSE_GAME_KEY in config else None
+    dialog = RunConfirm(children, done, done_text, clone, window, open_guide, close_game)
+    if dialog.close_game is not None:
+        # Kept as soon as it is clicked, like 打开就自动跑日常 on 首页.
+        dialog.close_game.toggled.connect(lambda on: config.__setitem__(CLOSE_GAME_KEY, on))
     if not dialog.exec():
         return None
     return dialog.mode, dict(dialog.ticks)
