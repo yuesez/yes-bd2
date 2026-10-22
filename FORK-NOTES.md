@@ -122,12 +122,22 @@ ImportError: cannot import name 'FIELD_FOLLOWERS_KEY' from 'src.tasks.BaseBD2Tas
 一整套文件。**只同步「我改的那几个文件」只在两边版本接近时可行**；版本差得远时，
 要么让启动器把安装版整个更新到最新再同步，要么直接用源码版（`run.bat`）。
 
-判断方法：先看两边的版本差多少
+### 用脚本同步（官方更新之后再跑）
+
+每次启动器更新都会覆盖安装目录，自己的改动就没了。别手工拷，用：
 
 ```powershell
-git rev-list --count HEAD  # 源码版
-# 安装版看 working\src\config.py 里的 version
+.\scripts\sync_to_install.ps1 -DryRun   # 先看会拷哪些文件
+.\scripts\sync_to_install.ps1           # 备份 + 拷贝 + 用安装版 Python 校验导入
 ```
+
+它会用 `git diff upstream/main...HEAD` 自己算出你改过哪些 `src\*.py`，自动备份被覆盖
+的文件到 `working-custom-backup-<时间>`，最后用安装版自己的 Python 跑一次导入校验——
+缺依赖会当场报错并提示用哪个备份还原（就是上面那个 ImportError 的教训）。
+
+**配置键不会被脚本补**：工具运行时自己写的 `configs\*.json` 在更新后可能丢掉新功能的键
+（2026-10-22：`按星期切换倍率` 等 5 个键就丢了，其余设置都在）。同步后打开工具，
+在对应的任务设定里看一眼、重设一下即可。
 
 ## 网络：访问 GitHub 需要走代理
 
