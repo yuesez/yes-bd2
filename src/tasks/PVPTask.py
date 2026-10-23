@@ -1617,12 +1617,28 @@ class PVPTask(BaseBD2Task):
 
     def _setting_multiplier_value(self) -> int | None:
         frame = self.capture_frame()
-        text = self._ocr_text(
-            frame,
-            name="PVP 倍率设置值",
-            roi=self._mf_roi(*PVP_MULTIPLIER_SETTING_VALUE_OCR_REFERENCE_ROI),
-        )
-        return parse_multiplier(text)
+        roi = self._mf_roi(*PVP_MULTIPLIER_SETTING_VALUE_OCR_REFERENCE_ROI)
+        text = self._ocr_text(frame, name="PVP 倍率设置值", roi=roi)
+        value = parse_multiplier(text)
+        if value is not None:
+            return value
+        # The 🍹 icon's stray "1" can swallow the 倍 of "1倍": read each box,
+        # then as a last resort the digits with one leading digit dropped
+        # ("11" -> 1, "140" -> 40).
+        for label, _confidence in self._ocr_entries(
+            frame, "PVP 倍率设置值（逐框）", roi
+        ):
+            boxed = parse_multiplier(label)
+            if boxed is not None:
+                return boxed
+        digits = re.sub(r"\D", "", text)
+        low, high = MULTIPLIER_RANGE
+        for candidate in (digits[1:], digits[:2], digits):
+            if candidate.isdigit() and candidate:
+                value = int(candidate)
+                if low <= value <= high:
+                    return value
+        return None
 
     def _battle_count_value(self) -> int | None:
         text = self._ocr_text(self.capture_frame(), name="PVP 战斗次数", roi=PVP_COUNT_ROI)
@@ -1825,14 +1841,57 @@ class PVPTask(BaseBD2Task):
         new_x, new_y = max(0, x - left), max(0, y - top)
         return new_x, new_y, x + width + right - new_x, y + height + bottom - new_y
 
+    @staticmethod
+    def _multiplier_readings(text: str, multiplier: int) -> list[str]:
+        """Readings of ``text`` that mean ``multiplier`` (倍 already stripped).
+
+        The 🍹 icon left of the value is its own OCR box and can come back as
+        a stray "1", so "1倍" arrives as "11" and never matches ^1$
+        (Leo 2026-10-23: 按星期切到 1 倍后战斗一直开不了).  A leading stray
+        digit is therefore ignored when exactly the target follows it.
+        """
+        target = str(multiplier)
+        readings = [text]
+        for cut in (1, 2):
+            if len(text) - cut == len(target) and text[cut:] == target:
+                readings.append(text[cut:])
+        return readings
+
     def _setting_multiplier_matches(self, multiplier: int) -> bool:
+        patterns = [rf"^{multiplier}$", rf"^{multiplier}倍$"]
+        roi = self._mf_roi(*PVP_MULTIPLIER_SETTING_VALUE_OCR_REFERENCE_ROI)
         found, text = self._wait_for_ocr_patterns(
-            [rf"^{multiplier}$", rf"^{multiplier}倍$"],
+            patterns,
             timeout=0.8,
             name="PVP 倍率设置值",
-            roi=self._mf_roi(*PVP_MULTIPLIER_SETTING_VALUE_OCR_REFERENCE_ROI),
+            roi=roi,
             normalize_multiplier=True,
         )
+        if not found:
+            # One box at a time, as `_multiplier_matches` already does for the
+            # main popup: the 🍹 icon is a neighbour and is its own box.
+            labels = [
+                self._normalize_multiplier_text(label)
+                for label, _confidence in self._ocr_entries(
+                    self.capture_frame(), "PVP 倍率设置值（逐框）", roi
+                )
+            ]
+            joined = self._normalize_multiplier_text(text)
+            readings = []
+            for label in labels:
+                readings.extend(self._multiplier_readings(label, multiplier))
+            readings.extend(self._multiplier_readings(joined, multiplier))
+            for reading in readings:
+                if self._matches_any(reading, patterns):
+                    found = True
+                    if joined and reading != joined:
+                        self.log_info(
+                            f"镜中之战：倍率设置值读到「{joined}」，"
+                            f"图标那个数字不算，按「{reading}」处理。"
+                        )
+                    break
+            if found or not text:
+                text = " ".join(labels) or text
         self.info_set("PVP 倍率 OCR", text or "-")
         return found
 
